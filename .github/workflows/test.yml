@@ -62,21 +62,25 @@ jobs:
           echo "kver=$(sed -n 's/^KVER *:= *//p' Makefile)" >> "$GITHUB_OUTPUT"
           echo "fc=$(git rev-parse HEAD:firecracker)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache guest kernel
+      # caches are restored here and saved at the end even when tests fail,
+      # so a failing run does not throw away a 10-minute kernel build
+      - name: Restore guest kernel
         id: kernel
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: build/vmlinux-${{ steps.keys.outputs.kver }}
           key: vmlinux-${{ steps.keys.outputs.kver }}-${{ hashFiles('kernel/agentcracker.config', 'firecracker/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config') }}
 
-      - name: Cache firecracker build
-        uses: actions/cache@v4
+      - name: Restore firecracker build
+        id: firecracker
+        uses: actions/cache/restore@v4
         with:
           path: firecracker/build/cargo_target
           key: firecracker-${{ steps.keys.outputs.fc }}
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Restore cargo
+        id: cargo
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -95,6 +99,31 @@ jobs:
             old=(-o "$PWD/build/vmlinux-${{ steps.keys.outputs.kver }}")
           fi
           make "${old[@]}" test
+
+      - name: Save guest kernel
+        if: always() && steps.kernel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/vmlinux-${{ steps.keys.outputs.kver }}
+          key: ${{ steps.kernel.outputs.cache-primary-key }}
+
+      - name: Save firecracker build
+        if: always() && steps.firecracker.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: firecracker/build/cargo_target
+          key: ${{ steps.firecracker.outputs.cache-primary-key }}
+
+      - name: Save cargo
+        if: always() && steps.cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            build/acinit-target
+          key: ${{ steps.cargo.outputs.cache-primary-key }}
 
       # failing tests keep their work directories; upload the logs, not the
       # (sparse, 64G) disk images
