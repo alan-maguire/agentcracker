@@ -1,6 +1,6 @@
 #!/bin/bash
 # Driving agentcracker from scripts and orchestrators: background sessions,
-# wait, stop and JSON output.
+# wait, stop, JSON output, and extra shells in a running session.
 . "$(dirname "$0")/lib.sh"
 require_vm
 new_project
@@ -79,5 +79,23 @@ rc=$(python3 -I -c 'import os, subprocess, sys
 r, w = os.pipe(); os.close(r)
 print(subprocess.run([sys.argv[1], "ls"], stdout=w, stderr=subprocess.DEVNULL).returncode)' "$AC")
 assert_eq "$rc" "141" "a closed stdout ends the output quietly"
+
+step "a shell in a running session"
+export SHELL=/bin/sh
+id=$("$AC" --detach sh -c 'echo agent > agent.txt; sleep 8' </dev/null)
+out=$(printf 'cat agent.txt; echo from-shell > shell.txt; echo "in $AGENTCRACKER_SESSION"; exit 3\n' | "$AC" shell "$id" 2>/dev/null)
+rc=$?
+assert_eq "$out" "$(printf 'agent\nin %s' "$id")" "the shell sees the agent's work in the same VM"
+assert_eq "$rc" "3" "the shell's exit status is returned"
+ac_pty 'sleep 1
+send echo TTY-$((6*7)); stty size\r
+expect TTY-42
+send exit\r' shell "$id"
+assert_contains "$AC_OUT" "40 120" "on a terminal it gets a terminal of its own"
+ac ls
+assert_match "$AC_OUT" "^$id .* running " "leaving the shell leaves the session running"
+ac wait "$id"
+ac show "$id"
+assert_contains "$AC_ERR" "A shell.txt" "the shell's changes are part of the session"
 
 finish

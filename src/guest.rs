@@ -667,6 +667,36 @@ fn pump_input(mut rd: UnixStream, input: RawFd, tty: bool, cpid: libc::pid_t) {
     }
 }
 
+/// Exit statuses of processes other than the session's command, as reaped
+/// by the main loop, for [`run_exec`] to collect.
+fn reaped() -> &'static (Mutex<std::collections::HashMap<libc::pid_t, i32>>, std::sync::Condvar) {
+    static R: OnceLock<(Mutex<std::collections::HashMap<libc::pid_t, i32>>, std::sync::Condvar)> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// Record that `pid` exited with wait status `status`.
+fn record_exit(pid: libc::pid_t, status: i32) {
+    let (m, cv) = reaped();
+    let mut g = m.lock().unwrap();
+    if g.len() > 4096 {
+        g.clear(); // orphans nobody waits for; never grow without bound
+    }
+    g.insert(pid, status);
+    cv.notify_all();
+}
+
+/// Wait for `pid`'s exit status, as recorded by [`record_exit`].
+fn wait_exit(pid: libc::pid_t) -> i32 {
+    let (m, cv) = reaped();
+    let mut g = m.lock().unwrap();
+    loop {
+        if let Some(st) = g.remove(&pid) {
+            return st;
+        }
+        g = cv.wait(g).unwrap();
+    }
+}
+
 /// Exit code for a wait status: the exit status, or 128 + signal.
 fn exit_code(status: i32) -> i32 {
     if libc::WIFEXITED(status) {
@@ -676,6 +706,102 @@ fn exit_code(status: i32) -> i32 {
     } else {
         1
     }
+}
+
+/// Accept connections from the host on [`PORT_EXEC`] and run each one's
+/// command in this session (see [`run_exec`]).  Connections from anywhere
+/// but the host (CID 2) are dropped.
+fn exec_server(cfg: GuestConfig) {
+    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return;
+    }
+    unsafe {
+        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+        addr.svm_cid = libc::VMADDR_CID_ANY;
+        addr.svm_port = PORT_EXEC;
+        let len = std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t;
+        if libc::bind(fd, (&addr as *const libc::sockaddr_vm).cast(), len) != 0 || libc::listen(fd, 8) != 0 {
+            libc::close(fd);
+            return;
+        }
+    }
+    loop {
+        let mut peer: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t;
+        let c = unsafe { libc::accept4(fd, (&mut peer as *mut libc::sockaddr_vm).cast(), &mut len, libc::SOCK_CLOEXEC) };
+        if c < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return;
+        }
+        let conn = unsafe { UnixStream::from_raw_fd(c) };
+        if peer.svm_cid != libc::VMADDR_CID_HOST {
+            continue; // dropped: only the host may start commands
+        }
+        let cfg = cfg.clone();
+        std::thread::spawn(move || {
+            let _ = run_exec(conn, cfg);
+        });
+    }
+}
+
+/// Run one [`ExecRequest`] arriving on `conn`: start the command like the
+/// session's own (same root, user, environment, directory), relay its
+/// input and output, and send its exit status.
+fn run_exec(conn: UnixStream, mut cfg: GuestConfig) -> Result<()> {
+    let mut rd = conn.try_clone()?;
+    let wr = Arc::new(Mutex::new(conn));
+    let (t, d) = read_frame(&mut rd)?;
+    if t != M_EXEC {
+        crate::bail!("expected an exec request");
+    }
+    let req: ExecRequest = serde_json::from_slice(&d)?;
+    if req.cmd.is_empty() {
+        crate::bail!("empty command");
+    }
+    cfg.cmd = req.cmd;
+    cfg.tty = req.tty;
+    cfg.rows = req.rows;
+    cfg.cols = req.cols;
+    if let Some(term) = req.term {
+        cfg.env.retain(|(k, _)| k != "TERM");
+        cfg.env.push(("TERM".into(), term));
+    }
+    let child = match spawn(&cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = write_frame(&mut *wr.lock().unwrap(), M_ERROR, e.0.as_bytes());
+            return Err(e);
+        }
+    };
+    write_frame(&mut *wr.lock().unwrap(), M_READY, &[])?;
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let mut n = 1;
+    stream_output(child.output, M_STDOUT, wr.clone(), done_tx.clone());
+    if let Some(e) = child.errors {
+        stream_output(e, M_STDERR, wr.clone(), done_tx.clone());
+        n += 1;
+    }
+    drop(done_tx);
+    let (cpid, input, tty) = (child.pid, child.input, cfg.tty);
+    std::thread::spawn(move || pump_input(rd, input, tty, cpid));
+    let code = exit_code(wait_exit(child.pid));
+    let end = std::time::Instant::now() + Duration::from_millis(500);
+    for _ in 0..n {
+        if done_rx.recv_timeout(end.saturating_duration_since(std::time::Instant::now())).is_err() {
+            break;
+        }
+    }
+    let mut w = wr.lock().unwrap();
+    write_frame(&mut *w, M_EXIT, &code.to_be_bytes())?;
+    let _ = w.shutdown(std::net::Shutdown::Both);
+    // the child's fds are left open: the relay threads may still hold them
+    // (a pty's input and output are one fd), and closing under them could
+    // hit a reused descriptor; a few fds per extra shell are harmless
+    Ok(())
 }
 
 fn run() -> Result<()> {
@@ -810,12 +936,21 @@ fn run() -> Result<()> {
     let (cpid, input, tty) = (child.pid, child.input, cfg.tty);
     std::thread::spawn(move || pump_input(rd, input, tty, cpid));
 
+    // extra commands in this running session (`agentcracker shell`)
+    {
+        let cfg = cfg.clone();
+        std::thread::spawn(move || exec_server(cfg));
+    }
+
     // reap everything; stop when the command itself exits
     let mut status = 0;
     loop {
         let r = unsafe { libc::waitpid(-1, &mut status, 0) };
         if r == child.pid {
             break;
+        }
+        if r > 0 {
+            record_exit(r, status);
         }
         if r < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
             break;

@@ -52,7 +52,7 @@ usage:
   agentcracker apply  [SESSION]         write the changes into the real directory
   agentcracker branch [SESSION]         turn the agent's git commits into a host branch
   agentcracker resume [SESSION] [command...]   boot again on the same overlay
-  agentcracker shell  [SESSION]         open a shell inside the session
+  agentcracker shell  [SESSION]         open a shell inside the session (also while it runs)
   agentcracker wait   [--json] [SESSION...]   wait for running sessions to end
   agentcracker stop   [SESSION...]      end running sessions (changes are kept)
   agentcracker rm     SESSION...        discard sessions
@@ -590,6 +590,11 @@ fn cmd_resume(args: &[String], shell: bool) -> Result<i32> {
         _ => None,
     };
     let mut s = session::find(id.as_deref(), &cwd()?)?;
+    if shell && s.is_running() {
+        // another terminal in the running VM, beside the session's command
+        let sh = vec![crate::util::user_shell(unsafe { libc::getuid() })];
+        return crate::vm::exec_running(&s, &sh);
+    }
     if !s.meta.cwd.is_dir() {
         crate::bail!("{} no longer exists", s.meta.cwd.display());
     }

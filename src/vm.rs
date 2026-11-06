@@ -713,3 +713,116 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
     Ok(Outcome { exit_code, exported, error: None })
 }
 
+/// Run `cmd` inside the session's running VM (`agentcracker shell` on a
+/// running session), attached to this terminal or to these pipes.
+///
+/// Connects through Firecracker's vsock socket in the session's runtime
+/// directory (`CONNECT` to [`PORT_EXEC`]), sends an [`ExecRequest`] and
+/// relays input, output and window size until the command exits.  Returns
+/// its exit status; errors if the VM cannot be reached or the session ends
+/// first.
+pub fn exec_running(s: &Session, cmd: &[String]) -> Result<i32> {
+    // a session that was just started may not have its VM (or the guest's
+    // listener) up yet: keep trying for a while as long as it is running
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let conn = loop {
+        match exec_connect(s) {
+            Ok(c) => break c,
+            Err(e) => {
+                if Instant::now() > deadline || !s.is_running() {
+                    crate::bail!("cannot reach session {}'s VM: {e}", s.meta.id);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
+    let tty = crate::util::isatty(0) && crate::util::isatty(1);
+    let (rows, cols) = winsize();
+    let req = ExecRequest { cmd: cmd.to_vec(), tty, rows, cols, term: std::env::var("TERM").ok() };
+    let mut rd = conn.try_clone()?;
+    let ctrl = Arc::new(Mutex::new(conn));
+    write_frame(&mut *ctrl.lock().unwrap(), M_EXEC, &serde_json::to_vec(&req)?)?;
+
+    let (stop_r, stop_w) = pipe()?;
+    let (winch_r, winch_w) = pipe()?;
+    WINCH_FD.store(winch_w, Ordering::Relaxed);
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_winch as *const () as usize;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGWINCH, &sa, std::ptr::null_mut());
+    }
+    let mut raw = if tty { RawTerm::enter() } else { None };
+    let pump = stdin_pump(ctrl.clone(), stop_r, winch_r, -1);
+    let mut out = io::stdout().lock();
+    let mut code = None;
+    let mut err = None;
+    while let Ok((t, d)) = read_frame(&mut rd) {
+        match t {
+            M_STDOUT => {
+                let _ = out.write_all(&d);
+                let _ = out.flush();
+            }
+            M_STDERR => {
+                let mut e = io::stderr().lock();
+                let _ = e.write_all(&d);
+                let _ = e.flush();
+            }
+            M_ERROR => {
+                err = Some(crate::util::safe_text(&d, true));
+                break;
+            }
+            M_EXIT => {
+                let mut b = [0u8; 4];
+                b.copy_from_slice(&d[..4.min(d.len())]);
+                code = Some(i32::from_be_bytes(b));
+                break;
+            }
+            _ => {}
+        }
+    }
+    unsafe { libc::write(stop_w, b"x".as_ptr().cast(), 1) };
+    raw.take();
+    let _ = ctrl.lock().map(|c| c.shutdown(std::net::Shutdown::Both));
+    let _ = pump.join();
+    WINCH_FD.store(-1, Ordering::Relaxed);
+    unsafe {
+        libc::signal(libc::SIGWINCH, libc::SIG_DFL);
+        for fd in [stop_r, stop_w, winch_r, winch_w] {
+            libc::close(fd);
+        }
+    }
+    if tty {
+        reset_terminal();
+    }
+    if let Some(e) = err {
+        crate::bail!("could not start {} in the session: {e}", cmd.first().map(|c| c.as_str()).unwrap_or("?"));
+    }
+    code.ctx(format!("session {} ended while the command was running", s.meta.id))
+}
+
+
+/// Open a connection to the guest's [`PORT_EXEC`] listener through
+/// Firecracker's vsock socket: send `CONNECT <port>` and expect `OK`.
+fn exec_connect(s: &Session) -> Result<UnixStream> {
+    use std::io::Read;
+    let uds = crate::util::runtime_dir().join(&s.meta.id).join("v.sock");
+    let mut conn = UnixStream::connect(&uds)?;
+    conn.write_all(format!("CONNECT {PORT_EXEC}\n").as_bytes())?;
+    // read the reply byte by byte so no frame data is consumed with it
+    let mut line = Vec::new();
+    let mut b = [0u8; 1];
+    while line.len() < 64 {
+        match conn.read(&mut b) {
+            Ok(0) => break,
+            Ok(_) if b[0] == b'\n' => break,
+            Ok(_) => line.push(b[0]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if !line.starts_with(b"OK") {
+        crate::bail!("the guest is not accepting connections yet");
+    }
+    Ok(conn)
+}

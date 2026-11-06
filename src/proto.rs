@@ -44,6 +44,14 @@ use crate::util::{Result, safe_rel_path};
 pub const PORT_CONTROL: u32 = 1024;
 /// vsock port of egress proxy connections (the host listens on `v.sock_1025`).
 pub const PORT_PROXY: u32 = 1025;
+/// vsock port the guest listens on for extra commands in a running session
+/// (`agentcracker shell` on a running session).  The host connects through
+/// Firecracker's vsock socket (`CONNECT 1026`); the guest accepts only
+/// connections from the host (CID 2).  The conversation is one
+/// [`M_EXEC`] request, then the same STDIN/RESIZE/STDIN_EOF/STOP frames
+/// from the host and READY/STDOUT/STDERR/ERROR/EXIT frames from the guest
+/// as on the control connection.
+pub const PORT_EXEC: u32 = 1026;
 /// Address of the proxy listener inside the guest, which `HTTPS_PROXY`
 /// points at.
 pub const GUEST_PROXY_ADDR: &str = "127.0.0.1:3128";
@@ -64,6 +72,9 @@ pub const M_STDIN_EOF: u8 = 6;
 /// host to guest: stop the command (SIGTERM to its process group, SIGKILL
 /// 5 s later if it is still there); it then exits and is exported normally.
 pub const M_STOP: u8 = 7;
+/// host to guest, first frame on a [`PORT_EXEC`] connection: an
+/// [`ExecRequest`], as JSON.
+pub const M_EXEC: u8 = 8;
 /// guest to host: setup is done and the command is starting.
 pub const M_READY: u8 = 10;
 /// guest to host: something failed (UTF-8 message); the guest then powers off.
@@ -88,6 +99,23 @@ pub const M_STDERR: u8 = 19;
 /// Largest frame payload accepted (16 MiB).  A larger length means a
 /// corrupt or hostile stream.
 const MAX_FRAME: usize = 1 << 24;
+
+/// A command to run in an already-running session (see [`PORT_EXEC`]).  It
+/// runs like the session's command: same root, user, environment and
+/// directory.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ExecRequest {
+    /// Program and arguments.
+    pub cmd: Vec<String>,
+    /// Give it a terminal (the requester is on one).
+    pub tty: bool,
+    /// Terminal rows.
+    pub rows: u16,
+    /// Terminal columns.
+    pub cols: u16,
+    /// The requester's `TERM`, if set.
+    pub term: Option<String>,
+}
 
 /// Everything acinit needs to set up the guest, sent as JSON in the CONFIG
 /// frame.  Built by `vm::boot` from the host's view of the user, the

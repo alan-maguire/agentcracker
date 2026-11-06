@@ -190,7 +190,12 @@ turns its network off.
 .BR shell " [\fIsession\fR]"
 Like
 .B resume
-with the user's login shell as the command.
+with the user's login shell as the command.  If the session is running
+(in another terminal, or in the background), the shell opens inside that
+same VM instead, beside the session's command and seeing its work as it
+happens; several can be open at once.  Leaving the shell leaves the
+session running; when the session's command exits, the VM shuts down and
+such shells end with it.  Their changes are part of the session.
 .TP
 .BR wait " [\fB\-\-json\fR] [\fIsession\fR...]"
 Wait until each session has ended, printing
@@ -673,6 +678,7 @@ c2a9f310 exit 1
 $ for id in $(cat ids); do
 >   agentcracker show \-\-json $id | jq \-c \(aq{id, exit_code, changes: .changes | del(.files)}\(aq
 > done
+$ agentcracker shell 77b0          # poke around in one (also while it runs)
 $ agentcracker diff 77b0 | less
 $ agentcracker apply 77b0 && agentcracker rm $(cat ids)
 .EE

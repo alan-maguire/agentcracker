@@ -55,7 +55,7 @@ agentcracker diff   [SESSION]
 agentcracker apply  [SESSION]
 agentcracker branch [SESSION]        # agent's commits -> branch agentcracker/<id>
 agentcracker resume [SESSION] [command...]
-agentcracker shell  [SESSION]
+agentcracker shell  [SESSION]        # also opens a shell inside a *running* session
 agentcracker wait   [--json] [SESSION...]   # for --detach'ed sessions
 agentcracker stop   [SESSION...]     # end running sessions, keeping their changes
 agentcracker rm     SESSION...

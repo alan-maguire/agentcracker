@@ -196,7 +196,18 @@ if the host goes away.  STOP is how `agentcracker stop` works: it sends
 SIGTERM to the session's host process (pid in `meta.json`), whose
 SIGTERM handler has `stdin_pump` send STOP; the guest gives the command
 SIGTERM, then SIGKILL 5 s later, and shutdown proceeds as usual.  The
-main thread reaps every process (as PID 1 must) until the command exits.
+main thread reaps every process (as PID 1 must) until the command exits,
+recording other exit statuses for extra shells (`record_exit`).
+
+Extra commands in a running session (`agentcracker shell` while it
+runs): acinit's `exec_server` listens on vsock port 1026 and accepts
+connections from the host only (CID 2).  The host (`vm::exec_running`)
+connects through Firecracker's `v.sock` with `CONNECT 1026`, sends an
+EXEC frame (`proto::ExecRequest`: command, terminal or not, size,
+`TERM`), and then speaks the same STDIN/RESIZE/STDIN_EOF and
+READY/STDOUT/STDERR/ERROR/EXIT frames as the control connection.  The
+guest starts the command with the session's own `spawn`, so it runs in
+the same root, as the same user, with the same environment.
 
 `--detach` (`cli::run_detached`) takes the session lock, forks, and lets
 the child (new session, stdin `/dev/null`, stdout/stderr to the
@@ -332,6 +343,7 @@ A frame is `type: u8`, `len: u32` big-endian, then `len` bytes (at most
 | 5 | RESIZE | host → guest | rows `u16`, cols `u16` |
 | 6 | STDIN_EOF | host → guest | — |
 | 7 | STOP | host → guest | — (SIGTERM the command, SIGKILL after 5 s) |
+| 8 | EXEC | host → guest | `ExecRequest` as JSON; first frame on port 1026 only |
 | 10 | READY | guest → host | — |
 | 11 | ERROR | guest → host | UTF-8 message; the guest powers off |
 | 12 | STDOUT | guest → host | command output |
@@ -343,6 +355,14 @@ A frame is `type: u8`, `len: u32` big-endian, then `len` bytes (at most
 
 Order: CONFIG, SEED*, SEED_END → READY → (STDOUT/STDERR ↔ STDIN/RESIZE)*
 → EXIT → EXPORT*, EXPORT_END → STATE*, STATE_END → DONE.
+
+### Exec connections (vsock port 1026)
+
+Host-initiated, through Firecracker (`CONNECT 1026` on `v.sock`, answered
+`OK <port>`).  EXEC, then the control connection's STDIN, RESIZE,
+STDIN_EOF and STOP frames from the host and READY, STDOUT, STDERR, ERROR
+and EXIT from the guest.  The guest drops connections from any CID but
+the host's.
 
 ### Proxy connections (vsock port 1025)
 
@@ -540,7 +560,7 @@ errors into `agentcracker: <msg>` and exit status 1.
   | `t08-branch.sh` | branch import |
   | `t09-sessions.sh` | listing, lookup, show, removal |
   | `t10-hostile-guest.sh` | credentials, terminal escapes, secrets in snapshots |
-  | `t11-orchestration.sh` | `--detach`, `wait`, `stop`, `--json` |
+  | `t11-orchestration.sh` | `--detach`, `wait`, `stop`, `--json`, shells in a running session |
 
   `AGENTCRACKER=/path/to/agentcracker make test` tests an installed copy.
   A failing test's work directory and sessions are kept under
