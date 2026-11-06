@@ -579,7 +579,11 @@ format events, escaping the agent's text.
   `.github/workflows/test.yml` runs `make test` on GitHub's Linux runners
   (which have KVM) for every push and pull request, caching the guest
   kernel, firecracker and cargo builds, and fails the job if any test
-  fails; logs of failed tests are uploaded as an artifact.
+  fails; logs of failed tests are uploaded as an artifact.  The runner
+  has no reflinks, so CI keeps the snapshots small: `AC_TEST_CONFIG`
+  gives every test a config with `exclude_usr` entries for what the tests
+  never use, and the tests run with a minimal `PATH` so no toolchains are
+  snapshotted.
   A failing test's work directory and sessions are kept under
   `build/tests/`.
 

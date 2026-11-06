@@ -14,6 +14,9 @@
 #   AC_TEST_DIR      where per-test work dirs go (default: build/tests; keep it
 #                    on the same filesystem as ~/.cache so snapshots hardlink)
 #   AC_KEEP=1        keep work dirs and sessions even when the test passes
+#   AC_TEST_CONFIG   a config.toml every test starts from (and set_config
+#                    adds to), e.g. CI's exclude_usr to keep the /usr
+#                    snapshot small; tests otherwise see no user config
 #   AC_VERBOSE=1     echo every agentcracker invocation and its output
 #
 # Isolation: each test gets its own XDG_STATE_HOME and XDG_CONFIG_HOME, so it
@@ -282,7 +285,10 @@ assert_edits_not_applied() {
 # Write a config file for this test (replaces any previous one).
 set_config() {
     mkdir -p "$XDG_CONFIG_HOME/agentcracker"
-    printf '%s\n' "$@" >"$XDG_CONFIG_HOME/agentcracker/config.toml"
+    {
+        if [ -n "${AC_TEST_CONFIG:-}" ]; then cat "$AC_TEST_CONFIG"; fi
+        printf '%s\n' "$@"
+    } >"$XDG_CONFIG_HOME/agentcracker/config.toml"
 }
 
 # --- prerequisites ----------------------------------------------------------------
@@ -360,6 +366,10 @@ export XDG_CONFIG_HOME=$WORK/config
 export PAGER=cat
 unset LESS
 mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
+if [ -n "${AC_TEST_CONFIG:-}" ]; then
+    [ -r "$AC_TEST_CONFIG" ] || { echo "AC_TEST_CONFIG: cannot read $AC_TEST_CONFIG" >&2; exit 1; }
+    set_config
+fi
 : >"$WORK/ac.log"
 trap _cleanup EXIT
 trap 'exit 130' INT TERM

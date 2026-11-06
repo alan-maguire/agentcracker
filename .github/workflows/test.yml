@@ -94,7 +94,7 @@ jobs:
           # seconds, and a ~1G entry per push would churn the 10G repo cache
           key: cargo-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build and test
+      - name: Build
         run: |
           # with a cached kernel, tell make not to rebuild it just because the
           # unpacked kernel source it was built from is not here
@@ -102,7 +102,35 @@ jobs:
           if [ "${{ steps.kernel.outputs.cache-hit }}" = true ]; then
             old=(-o "$PWD/build/vmlinux-${{ steps.keys.outputs.kver }}")
           fi
-          make "${old[@]}" test
+          make "${old[@]}" all
+
+      # Without reflinks the guest's /usr snapshot is a full copy (it took
+      # 18 minutes of the first run), so leave out what the tests never use:
+      # they need a shell, coreutils, git and curl in the guest.  A minimal
+      # PATH keeps the runner's toolchains (~/.rustup, ...) out of the
+      # toolchain snapshot for the same reason.  The snapshot is built in a
+      # step of its own so its cost shows; the tests then reuse it.
+      - name: Snapshot /usr
+        run: |
+          mkdir -p build/ci-config/agentcracker
+          cat >build/ci-config/agentcracker/config.toml <<'TOML'
+          exclude_usr = [
+            "/local", "/lib/jvm", "/lib/llvm-*", "/lib/google-cloud-sdk", "/lib/firefox",
+            "/lib/mono", "/lib/heroku", "/lib/node_modules", "/lib/gcc", "/libexec/gcc",
+            "/share/doc", "/share/man", "/share/info", "/share/locale", "/share/icons",
+            "/share/miniconda", "/share/swift", "/share/dotnet", "/share/az_*", "/share/sbt",
+            "/share/kotlinc", "/share/gradle*", "/share/apache-maven*", "/share/vcpkg",
+            "/share/R", "/lib/R", "/share/fonts", "/share/texmf", "/share/texlive",
+          ]
+          TOML
+          XDG_CONFIG_HOME=$PWD/build/ci-config PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            target/release/agentcracker refresh
+          df -h /
+
+      - name: Test
+        env:
+          AC_TEST_CONFIG: ${{ github.workspace }}/build/ci-config/agentcracker/config.toml
+        run: PATH=/usr/sbin:/usr/bin:/sbin:/bin tests/run.sh
 
       - name: Save guest kernel
         if: always() && steps.kernel.outputs.cache-hit != 'true'
