@@ -563,6 +563,10 @@ errors into `agentcracker: <msg>` and exit status 1.
   | `t11-orchestration.sh` | `--detach`, `wait`, `stop`, `--json`, shells in a running session |
 
   `AGENTCRACKER=/path/to/agentcracker make test` tests an installed copy.
+  `.github/workflows/test.yml` runs `make test` on GitHub's Linux runners
+  (which have KVM) for every push and pull request, caching the guest
+  kernel, firecracker and cargo builds, and fails the job if any test
+  fails; logs of failed tests are uploaded as an artifact.
   A failing test's work directory and sessions are kept under
   `build/tests/`.
 

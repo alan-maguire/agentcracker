@@ -976,7 +976,8 @@ and a new session warns about project files that look like credentials
 **Tests.**  `tests/` holds standalone bash scripts sharing `tests/lib.sh`
 (logging, assertions, an isolated session store per test) and
 `tests/pty.py` (drives the interactive review on a pseudo-terminal).
-`make test` runs them all against the in-tree build; `tests/run.sh apply
+`make test` runs them all against the in-tree build (and GitHub Actions
+runs it on every push and pull request); `tests/run.sh apply
 resume` runs a subset, and any `tests/tNN-*.sh` can be run on its own.
 `AGENTCRACKER=/usr/local/bin/agentcracker` tests an installed copy instead.
 Tests need `/dev/kvm`; they share `~/.cache/agentcracker` (so the `/usr`
