@@ -372,6 +372,7 @@ reaches the host, and how each one is handled:
 | `state.stream` | Unpacked with `Confined` into the session's `state/`; symlinks and deletions ignored. |
 | Credentials | Never written back to the host or kept in the session; a refresh in the guest is only reported. |
 | Terminal output | Every guest-derived string agentcracker prints (paths, symlink targets, diffs on a terminal, branch names, host names, transcript text, guest errors, console tails) goes through `util::safe_text`, which shows control, C1 and bidi-override characters as escapes; the terminal is soft-reset after an interactive session; the proxy refuses CONNECT targets that are not host names or IP literals. |
+| Secrets in the snapshots | The project snapshot's `.git/config` has `user:token@` stripped from URLs and `extraheader` lines dropped; the toolchain snapshot excludes cargo, npm, PyPI, netrc and git credential files; new sessions warn about credential-like project files (`images::credential_like`). |
 | Network | No NIC; HTTPS `CONNECT` only, to allowlisted hosts (port 443 unless `host:port` is listed); DNS resolved on the host; decisions logged. |
 | Firecracker | Runs as the user, with the compiled seccomp filter.  **No jailer**: it needs root, which conflicts with the rootless goal, so there is no chroot or cgroup limit around the VMM. |
 

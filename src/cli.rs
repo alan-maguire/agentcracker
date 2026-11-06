@@ -265,6 +265,18 @@ fn cmd_run(args: &[String]) -> Result<i32> {
             link(d, "lower-delta.img")?;
         }
         s.save_manifest(&lower.manifest_file)?;
+        let creds = images::credential_like(&lower.manifest_file, 6);
+        if !creds.is_empty() {
+            let mut list: Vec<String> = creds.iter().take(5).map(|p| crate::util::safe_text(p.as_bytes(), false)).collect();
+            if creds.len() > 5 {
+                list.push("...".into());
+            }
+            eprintln!(
+                "agentcracker: warning: the agent can read files that look like credentials: {}\n  \
+                 (if it doesn't need them, leave them out with exclude = [...] in .agentcracker.toml)",
+                list.join(", ")
+            );
+        }
         crate::util::mark("session files");
         images::create_scratch(&s.path("scratch.img"), 64)?;
         crate::util::mark("scratch disk");

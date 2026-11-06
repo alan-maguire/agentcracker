@@ -380,6 +380,16 @@ const NEVER_TOOLS: &[&str] = &[
     ".mozilla", ".netrc", ".git-credentials", ".local/share/keyrings", ".claude",
 ];
 
+/// Left out of the toolchain snapshot: caches and scratch space, and the
+/// well-known places toolchains keep registry credentials (cargo's
+/// `credentials`/`credentials.toml` at the root of `~/.cargo`, npm, PyPI,
+/// netrc and git credential files anywhere), which the agent has no use
+/// for and could otherwise read and send out.
+const TOOLS_EXCLUDE: &[&str] = &[
+    ".cache/", "/downloads/", "/tmp/",
+    "/credentials", "/credentials.toml", ".npmrc", ".pypirc", ".netrc", ".git-credentials",
+];
+
 /// Map a directory found on `$PATH` (or holding a symlink's target) to the
 /// toolchain root to snapshot so that it works in the guest.
 ///
@@ -515,6 +525,9 @@ pub fn tools_image(cfg: &Config, tools: &[PathBuf]) -> Result<PathBuf> {
     crate::util::mkdir_private(&dir)?;
     let mut h = Fnv::new();
     h.str(FORMAT);
+    for e in TOOLS_EXCLUDE {
+        h.str(e); // a changed list must not reuse an image built without it
+    }
     let path = std::env::var("PATH").unwrap_or_default();
     for t in tools {
         h.bytes(t.as_os_str().as_bytes());
@@ -546,7 +559,7 @@ pub fn tools_image(cfg: &Config, tools: &[PathBuf]) -> Result<PathBuf> {
     let t0 = Instant::now();
     let hm = home();
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    let excl = Excludes::new(&[".cache/".into(), "/downloads/".into(), "/tmp/".into()]);
+    let excl = Excludes::new(&TOOLS_EXCLUDE.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     let mut tree = Tree::new(0o755, 0, 0);
     let mut stats = WalkStats::default();
     for t in tools {
@@ -795,6 +808,7 @@ pub fn lower_image(cfg: &Config, cwd: &Path) -> Result<Lower> {
     let mut manifest = Vec::new();
     let mut stats = WalkStats::default();
     tree.walk_into(0, cwd, &excl, None, Some(&mut manifest), &mut stats)?;
+    scrub_git_config(&mut tree, cwd);
     let mut hd = Fnv::new();
     hd.str(FORMAT).bytes(cwd.as_os_str().as_bytes());
     if let Ok(md) = std::fs::metadata(cwd) {
@@ -802,7 +816,8 @@ pub fn lower_image(cfg: &Config, cwd: &Path) -> Result<Lower> {
     }
     let dkey = hd.hex();
     let mut h = Fnv::new();
-    h.str(&dkey);
+    // "scrub1": snapshots from before .git/config scrubbing are not reused
+    h.str(&dkey).str("scrub1");
     for m in &manifest {
         h.bytes(&m.raw).u64(m.mode as u64).u64(m.size).u64(m.mtime_ns as u64).u64(m.ino);
     }
@@ -877,6 +892,79 @@ pub fn lower_image(cfg: &Config, cwd: &Path) -> Result<Lower> {
         ));
     }
     Ok(done(full, None))
+}
+
+/// Remove credentials from the snapshot's copy of `.git/config` (the host
+/// file is untouched): the user:password part of remote URLs (the usual
+/// way a token ends up in a repository) and `extraheader` settings (CI
+/// style `Authorization:` headers).  The guest's git then asks for
+/// credentials it does not have instead of handing the agent a token.
+fn scrub_git_config(tree: &mut Tree, cwd: &Path) {
+    let Some(git) = tree.child(0, b".git") else { return };
+    let Some(cfg) = tree.child(git, b"config") else { return };
+    let Ok(text) = std::fs::read_to_string(cwd.join(".git/config")) else { return };
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    for line in text.lines() {
+        let l = line.trim_start().to_ascii_lowercase();
+        if l.starts_with("extraheader") {
+            changed = true;
+            continue;
+        }
+        let scrubbed = strip_url_userinfo(line);
+        changed |= scrubbed != line;
+        out.push_str(&scrubbed);
+        out.push('\n');
+    }
+    if changed {
+        let n = &mut tree.nodes[cfg];
+        if matches!(n.kind, crate::erofs::Kind::File(..)) {
+            let len = out.len() as u64;
+            n.kind = crate::erofs::Kind::File(crate::erofs::Content::Bytes(out.into_bytes()), len);
+        }
+    }
+}
+
+/// `scheme://user:secret@host/...` becomes `scheme://host/...` wherever it
+/// appears in `line`.
+fn strip_url_userinfo(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail.find(|c: char| c == '/' || c.is_whitespace() || c == '"').unwrap_or(tail.len());
+        match tail[..end].rfind('@') {
+            Some(at) => rest = &tail[at + 1..],
+            None => rest = tail,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Project files that look like credentials: dotenv files, private keys
+/// and key stores, and registry/netrc/cloud credential files.  Returns
+/// their paths relative to the project (at most `limit`).
+pub fn credential_like(manifest_file: &Path, limit: usize) -> Vec<String> {
+    let Ok(m) = crate::erofs::read_manifest(manifest_file) else { return vec![] };
+    let mut v = Vec::new();
+    for e in m.iter().filter(|e| e.mode & libc::S_IFMT == libc::S_IFREG) {
+        let name = e.path.rsplit('/').next().unwrap_or(&e.path);
+        let lower = name.to_ascii_lowercase();
+        let env = lower == ".env" || (lower.starts_with(".env.") && !lower.ends_with(".example") && !lower.ends_with(".sample") && !lower.ends_with(".template"));
+        let key = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk"].iter().any(|x| lower.ends_with(x))
+            || lower.starts_with("id_rsa") || lower.starts_with("id_ed25519") || lower.starts_with("id_ecdsa");
+        let named = [".npmrc", ".pypirc", ".netrc", ".git-credentials", "credentials.json", "service-account.json", ".htpasswd", "secrets.yaml", "secrets.yml", "secrets.json"]
+            .contains(&lower.as_str());
+        if (env || key || named) && !e.path.starts_with(".git/") {
+            v.push(e.path.clone());
+            if v.len() >= limit {
+                break;
+            }
+        }
+    }
+    v
 }
 
 /// The most recently used full snapshot of directory `dkey` in `dir` that

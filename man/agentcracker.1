@@ -518,8 +518,14 @@ agent steered by a malicious prompt can still send data out through
 them.  Only
 .B \-\-no\-net
 closes those channels (and with them the agent's own API access).  Keep
-secrets out of the project directory and the toolchain directories the
-guest can see.
+secrets out of what the guest can see: tokens are stripped from remote
+URLs in the snapshot's
+.I .git/config
+and registry credential files are left out of the toolchain snapshot,
+and a new session warns about project files that look like credentials
+(\fI.env\fR, private keys, ...), which
+.B exclude
+can leave out.
 .PP
 Nothing flows from the guest to the host except the change record, the
 agent's transcripts and the network log.  Credentials are never copied

@@ -31,6 +31,39 @@ assert_no_file "$(session_dir "$SID")/state/.claude/.credentials.json" "guest cr
 fakeenv ac_run true
 assert_not_contains "$AC_ERR" "refreshed its login" "no report when the guest left them alone"
 
+step "registry credentials stay out of the toolchain snapshot"
+mkdir -p "$fake/.cargo/bin"
+printf '#!/bin/sh\necho tool-ok\n' >"$fake/.cargo/bin/mytool" && chmod +x "$fake/.cargo/bin/mytool"
+printf '[registry]\ntoken = "SECRET"\n' >"$fake/.cargo/credentials.toml"
+HOME=$fake XDG_CACHE_HOME=$WORK/cache PATH=$fake/.cargo/bin:/usr/bin:/bin ac_run sh -c 'mytool; test -e $HOME/.cargo/credentials.toml && echo CREDS-VISIBLE || echo creds-hidden'
+assert_contains "$AC_OUT" "tool-ok" "the toolchain itself is available"
+assert_contains "$AC_OUT" "creds-hidden" "cargo's credentials.toml is not in the guest"
+
+step "secrets in the project's git config"
+new_project gitcreds
+git init -q . && git remote add origin https://someone:ghp_SECRET123@github.com/o/r.git
+git config http.https://github.com/.extraheader "AUTHORIZATION: basic SECRET456"
+host_cfg=$(cat .git/config)
+ac_run sh -c 'cat .git/config; git remote get-url origin'
+assert_not_contains "$AC_OUT" "SECRET" "no token from .git/config reaches the guest"
+assert_contains "$AC_OUT" "https://github.com/o/r.git" "the remote itself is still there"
+assert_eq "$(cat .git/config)" "$host_cfg" "the host's .git/config is untouched"
+echo changed >hello.txt
+ac_run sh -c 'cat .git/config'
+assert_not_contains "$AC_OUT" "SECRET" "still scrubbed in a delta snapshot"
+
+step "warning about credential-like files"
+new_project credfiles
+echo "API_KEY=x" >.env; echo x >.env.example; mkdir -p certs && echo x >certs/server.key
+ac_run true
+assert_contains "$AC_ERR" "warning: the agent can read files that look like credentials" "a warning is printed"
+assert_contains "$AC_ERR" ".env" "the dotenv file is named"
+assert_contains "$AC_ERR" "certs/server.key" "the private key is named"
+assert_not_contains "$AC_ERR" ".env.example" "example files are not"
+new_project nocreds
+ac_run true
+assert_not_contains "$AC_ERR" "look like credentials" "no warning for a project without such files"
+
 step "escape sequences in file names and contents"
 new_project escapes
 ac_run sh -c '

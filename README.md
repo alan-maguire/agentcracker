@@ -959,6 +959,15 @@ on Anthropic's servers, so their queries (and any URLs they fetch) never
 pass through agentcracker's proxy at all.  Only `--no-net` closes these
 channels, and it also cuts off the agent's API.
 
+So agentcracker keeps what it can out of the guest's reach: the snapshot's
+`.git/config` has `user:token@` stripped from remote URLs and
+`extraheader` settings removed (the host file is untouched); the
+toolchain snapshot leaves out registry credentials (cargo's
+`credentials.toml`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`);
+and a new session warns about project files that look like credentials
+(`.env`, private keys, key stores, ...), which can then be left out with
+`exclude`.
+
 **Tests.**  `tests/` holds standalone bash scripts sharing `tests/lib.sh`
 (logging, assertions, an isolated session store per test) and
 `tests/pty.py` (drives the interactive review on a pseudo-terminal).
