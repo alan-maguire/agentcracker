@@ -1014,15 +1014,27 @@ fn gc_lower(dir: &Path) {
 /// Returns an error if `mkfs.ext4` cannot be run (e2fsprogs missing) or
 /// fails.
 pub fn create_scratch(path: &Path, size_gib: u64) -> Result<()> {
-    let st = std::process::Command::new("mkfs.ext4")
+    // mkfs.ext4 lives in sbin, which is often not on an ordinary user's PATH
+    // (Debian and Ubuntu); and some versions announce "Creating regular
+    // file" on stdout even with -q, which must not mix with the command's
+    // output, so stdout is discarded and stderr kept for errors
+    let mkfs = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .chain(["/usr/sbin", "/sbin"])
+        .map(|d| Path::new(d).join("mkfs.ext4"))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("mkfs.ext4"));
+    let out = std::process::Command::new(&mkfs)
         .args(["-q", "-F", "-m", "0", "-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1", "-L", "acscratch"])
         .arg(path)
         .arg(format!("{size_gib}G"))
         .stdin(std::process::Stdio::null())
-        .status()
+        .stdout(std::process::Stdio::null())
+        .output()
         .ctx("running mkfs.ext4 (install e2fsprogs)")?;
-    if !st.success() {
-        crate::bail!("mkfs.ext4 failed for {}", path.display());
+    if !out.status.success() {
+        crate::bail!("mkfs.ext4 failed for {}: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(())
 }

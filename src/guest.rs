@@ -618,7 +618,7 @@ fn stream_output(fd: RawFd, kind: u8, wr: Arc<Mutex<UnixStream>>, done: mpsc::Se
 ///
 /// `input`: the command's stdin (the pty master when `tty`); `cpid`: the
 /// command, which leads its own process group.
-fn pump_input(mut rd: UnixStream, input: RawFd, tty: bool, cpid: libc::pid_t) {
+fn pump_input(mut rd: UnixStream, input: RawFd, tty: bool, cpid: libc::pid_t, host_gone: Option<mpsc::Sender<()>>) {
     let mut last = b'\n';
     let mut input_closed = false;
     let mut stopping = false;
@@ -626,6 +626,9 @@ fn pump_input(mut rd: UnixStream, input: RawFd, tty: bool, cpid: libc::pid_t) {
         let Ok((t, d)) = read_frame(&mut rd) else {
             // host went away: end the command
             unsafe { libc::kill(-cpid, libc::SIGHUP) };
+            if let Some(tx) = host_gone {
+                let _ = tx.send(());
+            }
             break;
         };
         match t {
@@ -787,7 +790,7 @@ fn run_exec(conn: UnixStream, mut cfg: GuestConfig) -> Result<()> {
     }
     drop(done_tx);
     let (cpid, input, tty) = (child.pid, child.input, cfg.tty);
-    std::thread::spawn(move || pump_input(rd, input, tty, cpid));
+    std::thread::spawn(move || pump_input(rd, input, tty, cpid, None));
     let code = exit_code(wait_exit(child.pid));
     let end = std::time::Instant::now() + Duration::from_millis(500);
     for _ in 0..n {
@@ -934,7 +937,8 @@ fn run() -> Result<()> {
 
     // host -> command input
     let (cpid, input, tty) = (child.pid, child.input, cfg.tty);
-    std::thread::spawn(move || pump_input(rd, input, tty, cpid));
+    let (gone_tx, gone_rx) = mpsc::channel();
+    std::thread::spawn(move || pump_input(rd, input, tty, cpid, Some(gone_tx)));
 
     // extra commands in this running session (`agentcracker shell`)
     {
@@ -997,6 +1001,12 @@ fn run() -> Result<()> {
     let _ = w.flush();
     let _ = w.shutdown(std::net::Shutdown::Write);
     drop(w);
+    // Don't reset the VM until the host has closed the connection, which it
+    // does only after reading DONE: bytes still queued in the vsock device
+    // would otherwise be lost when Firecracker stops (seen on a loaded CI
+    // runner as a session whose exit status arrived but whose changes did
+    // not).  The timeout covers a host that has gone away.
+    let _ = gone_rx.recv_timeout(Duration::from_secs(10));
     Ok(())
 }
 

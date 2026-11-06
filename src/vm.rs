@@ -705,6 +705,9 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
         }
     }
     let _ = ctrl.lock().map(|c| c.shutdown(std::net::Shutdown::Both));
+    if err.is_none() && !exported {
+        err = Some("lost the connection to the guest after the command exited; the session's changes were not received".into());
+    }
     if let Some(e) = err {
         let tail = console_tail(s, 15);
         let msg = if tail.trim().is_empty() { e } else { format!("{e}\n--- guest console (last lines) ---\n{tail}") };

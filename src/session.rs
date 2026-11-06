@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::erofs::ManifestEntry;
-use crate::util::{Context, Result, now, state_dir};
+use crate::util::{Context, Result, state_dir};
 
 /// Counts of user-visible changes, kept in `meta.json` so `agentcracker ls`
 /// does not have to re-read the change stream.
@@ -57,6 +57,10 @@ pub struct Meta {
     pub cmd: Vec<String>,
     /// Creation time, Unix seconds.
     pub created: u64,
+    /// Nanoseconds within `created`: orders sessions created in the same
+    /// second.
+    #[serde(default)]
+    pub created_ns: u32,
     /// When the most recent boot ended, Unix seconds.
     #[serde(default)]
     pub ended: Option<u64>,
@@ -143,6 +147,7 @@ impl Session {
     pub fn create(cwd: &Path, cmd: &[String]) -> Result<Session> {
         let root = sessions_dir();
         crate::util::mkdir_private(&root)?;
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         loop {
             let id = crate::util::random_hex(4);
             let dir = root.join(&id);
@@ -151,7 +156,8 @@ impl Session {
                     id,
                     cwd: cwd.to_path_buf(),
                     cmd: cmd.to_vec(),
-                    created: now(),
+                    created: t.as_secs(),
+                    created_ns: t.subsec_nanos(),
                     status: "starting".into(),
                     ..Default::default()
                 };
@@ -298,7 +304,7 @@ pub fn list() -> Vec<Session> {
         Ok(rd) => rd.filter_map(|e| e.ok()).filter_map(|e| Session::load_dir(&e.path()).ok()).collect(),
         Err(_) => vec![],
     };
-    v.sort_by_key(|s| s.meta.created);
+    v.sort_by_key(|s| (s.meta.created, s.meta.created_ns));
     v
 }
 
