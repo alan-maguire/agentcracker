@@ -64,6 +64,20 @@ assert_eq "$AC_OUT" "$(printf 'host edit\nfresh\n700')" "a new session sees edit
 ac show "$SID"
 assert_contains "$AC_OUT" "no changes" "the delta is not mistaken for agent changes"
 
+step "flags for risky changes"
+git init -q . && git config core.hooksPath .hooks
+ac_run sh -c 'mkdir -p .hooks scripts sub; echo x > .hooks/pre-commit; echo x > scripts/build.sh; echo x > rules.mk; echo x > CMakeLists.txt; ln -s /etc/passwd abs-link; ln -s ../../outside sub/rel-link; ln -s ../hello.txt sub/ok-link; echo x > plain.c'
+ac show "$SID"
+assert_contains "$AC_ERR" "A .hooks/pre-commit  (runs or configures tools" "a file under core.hooksPath inside the project is flagged"
+assert_contains "$AC_ERR" "A scripts/build.sh  (runs or configures tools" "shell scripts are flagged"
+assert_contains "$AC_ERR" "A rules.mk  (runs or configures tools" "make fragments are flagged"
+assert_contains "$AC_ERR" "A CMakeLists.txt  (runs or configures tools" "CMake files are flagged"
+assert_contains "$AC_ERR" "A abs-link -> /etc/passwd  (points outside the project)" "an absolute symlink is flagged"
+assert_contains "$AC_ERR" "A sub/rel-link -> ../../outside  (points outside the project)" "a symlink climbing out of the project is flagged"
+assert_match "$AC_ERR" "A sub/ok-link -> \.\./hello\.txt$" "a symlink staying inside the project is not flagged"
+assert_match "$AC_ERR" "A plain\.c$" "ordinary source files are not flagged"
+rm -rf .git
+
 step "excluded paths"
 mkdir -p node_modules/pkg && echo dep >node_modules/pkg/index.js
 set_config 'exclude = ["node_modules", "/secret.txt"]'

@@ -135,7 +135,10 @@ pub struct ChangeSet {
 /// (`.envrc`, `.env`, `.bashrc`, ...), git attribute and module files, CI
 /// and container configuration, and anything under editor, CI or agent
 /// configuration directories such as `.vscode/`, `.github/` or `.claude/`,
-/// at any depth.  Such changes are highlighted in the review, not blocked.
+/// at any depth, and scripts by extension (`.sh`, `.mk`, ...).  Changes
+/// under a `core.hooksPath` inside the project and symlinks pointing
+/// outside it are flagged too (see [`ChangeSet::from_stream`]).  Such
+/// changes are highlighted in the review, not blocked.
 pub fn is_sensitive(p: &[u8]) -> bool {
     let s = String::from_utf8_lossy(p);
     let name = s.rsplit('/').next().unwrap_or(&s);
@@ -145,9 +148,69 @@ pub fn is_sensitive(p: &[u8]) -> bool {
         "pyproject.toml", "build.rs", "Cargo.toml", ".bashrc", ".zshrc", ".profile", ".bash_profile",
         "Justfile", "justfile", "Taskfile.yml", "Dockerfile", ".editorconfig", ".clang-format", "conftest.py",
         ".gitlab-ci.yml", "Jenkinsfile", "flake.nix", "shell.nix", "direnv.toml",
+        // more build systems and package manifests (dependency changes are
+        // supply-chain changes)
+        "CMakeLists.txt", "meson.build", "meson_options.txt", "configure", "configure.ac", "Makefile.am",
+        "Makefile.in", "Kbuild", "Kconfig", "BUILD", "BUILD.bazel", "WORKSPACE", "MODULE.bazel", ".bazelrc",
+        "SConstruct", "Rakefile", "Gemfile", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts",
+        "settings.gradle", "setup.cfg", "tox.ini", "noxfile.py", "pytest.ini", "Pipfile", "requirements.txt",
+        "requirements-dev.txt", "Vagrantfile", ".travis.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml",
+        ".gitconfig", ".lfsconfig",
     ];
-    const DIRS: &[&str] = &[".vscode/", ".idea/", ".github/", ".husky/", ".devcontainer/", ".circleci/", ".claude/", ".cargo/"];
-    NAMES.contains(&name) || DIRS.iter().any(|d| s.starts_with(d) || s.contains(&format!("/{d}")))
+    const EXTS: &[&str] = &[".mk", ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd", ".service", ".desktop"];
+    const DIRS: &[&str] = &[
+        ".vscode/", ".idea/", ".github/", ".husky/", ".devcontainer/", ".circleci/", ".claude/", ".cargo/",
+        ".githooks/", ".gitlab/", ".buildkite/", ".gitea/", ".forgejo/", ".config/",
+    ];
+    NAMES.contains(&name)
+        || EXTS.iter().any(|e| name.ends_with(e))
+        || DIRS.iter().any(|d| s.starts_with(d) || s.contains(&format!("/{d}")))
+}
+
+/// Does symlink `path` (relative to the project root) with target `target`
+/// point outside the project?  Absolute targets always do; relative ones
+/// do when their `..` components climb above the root.  Such a link is
+/// harmless to create, but host tools that later follow it (a build that
+/// reads or copies it, an editor) reach files outside the project.
+pub fn symlink_escapes(path: &[u8], target: &[u8]) -> bool {
+    if target.first() == Some(&b'/') {
+        return true;
+    }
+    // depth of the link's directory below the root
+    let mut depth = path.iter().filter(|&&b| b == b'/').count() as isize;
+    for comp in target.split(|&b| b == b'/') {
+        match comp {
+            b"" | b"." => {}
+            b".." => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            _ => depth += 1,
+        }
+    }
+    false
+}
+
+/// Where git on the host looks for hooks, if that is inside the project:
+/// `core.hooksPath` resolved against the repository's top level, made
+/// relative to `cwd`.  Agent changes there are hooks git will run on the
+/// host.  Returns `None` when unset, outside the project or not a repo.
+fn hooks_path_in(cwd: &Path) -> Option<Vec<u8>> {
+    let git = |args: &[&str]| -> Option<String> {
+        let o = std::process::Command::new("git").arg("-C").arg(cwd).args(args).stderr(std::process::Stdio::null()).output().ok()?;
+        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())
+    };
+    let hp = git(&["config", "--get", "core.hooksPath"])?;
+    let hp = crate::config::expand(&hp);
+    let abs = if hp.is_absolute() { hp } else { PathBuf::from(git(&["rev-parse", "--show-toplevel"])?).join(hp) };
+    let rel = abs.strip_prefix(cwd).ok()?;
+    let mut v = rel.as_os_str().as_bytes().to_vec();
+    if !v.is_empty() {
+        v.push(b'/');
+    }
+    Some(v)
 }
 
 /// The conflict test: returns true if the host entry for manifest entry
@@ -264,6 +327,7 @@ impl ChangeSet {
             entries.push((p, op, opaque));
         }
         let in_stream: HashSet<Vec<u8>> = entries.iter().map(|e| e.0.clone()).collect();
+        let hooks = hooks_path_in(cwd);
         let mut git = Vec::new();
         let mut changes = Vec::new();
         let under = |p: &[u8], dir: &[u8]| p.len() > dir.len() && p.starts_with(dir) && p[dir.len()] == b'/';
@@ -274,7 +338,10 @@ impl ChangeSet {
             }
             let m = man.get(raw.as_slice()).copied();
             let host = cwd.join(OsStr::from_bytes(&raw));
-            let mut c = Change { raw: raw.clone(), op: op.clone(), st: St::Added, conflict: false, sensitive: is_sensitive(&raw), mode_only: false, nested: 0, in_place: false };
+            let sensitive = is_sensitive(&raw)
+                || hooks.as_ref().is_some_and(|h| raw.starts_with(h))
+                || matches!(&op, Op::Symlink { target } if symlink_escapes(&raw, target));
+            let mut c = Change { raw: raw.clone(), op: op.clone(), st: St::Added, conflict: false, sensitive, mode_only: false, nested: 0, in_place: false };
             match (&op, m) {
                 (Op::File { mode, off, size }, Some(m)) => {
                     let was_file = m.mode & libc::S_IFMT == libc::S_IFREG;
@@ -484,7 +551,10 @@ pub fn print_list(cs: &ChangeSet, limit: usize) {
         if c.in_place {
             notes.push("already on the host".to_string());
         }
-        if c.sensitive {
+        let escapes = matches!(&c.op, Op::Symlink { target } if symlink_escapes(&c.raw, target));
+        if escapes {
+            notes.push(format!("{y}points outside the project{z}"));
+        } else if c.sensitive {
             notes.push(format!("{y}runs or configures tools on the host - review carefully{z}"));
         }
         let notes = if notes.is_empty() { String::new() } else { format!("  {d}({z}{}{d}){z}", notes.join(", ")) };

@@ -122,9 +122,8 @@ change counts (+added ~modified \-deleted), directory and command.
 .BR show " [\fIsession\fR]"
 Everything recorded about a session: command, times, status and boot
 count, VM shape and network policy, the list of changes, each host it
-connected to (with the
-.B \-\-allow
-flag that would admit a denied one), the agent's transcripts, and disk use.
+connected to or was refused (the agent chose those names: allow one only
+if the work really needs it), the agent's transcripts, and disk use.
 .TP
 .BR diff " [\fIsession\fR]"
 Show the session's changes as a unified diff against the current host
@@ -197,7 +196,10 @@ allows every subdomain of
 .I domain
 itself);
 .IB host : port
-allows a port other than 443.  May be repeated.
+allows a port other than 443.
+.B "\-\-allow \(aq*\(aq"
+allows HTTPS to any host, which gives up most of the network sandbox
+(the session banner says so).  May be repeated.
 .TP
 .B \-\-no\-net
 No network at all.
@@ -451,7 +453,7 @@ $ agentcracker resume make test
 .SS Let it reach another host
 .EX
 $ agentcracker show | grep denied
-network    crates.io                        3 denied (rerun with \-\-allow crates.io)
+network    crates.io                        3 denied
 $ agentcracker resume \-\-allow crates.io \-\-allow static.crates.io cargo build
 .EE
 .SS Apply the work
@@ -495,6 +497,16 @@ credentials (other than the agent's own), other repositories, or the
 network beyond the allowlist, and a compromise of the guest kernel
 stays inside the VM.  Firecracker itself runs as the invoking user under
 a seccomp filter, without its jailer (which needs root).
+.PP
+The network allowlist limits where the VM connects, not what leaves it:
+the Anthropic API accepts any API key, and server-side tools such as web
+search run on Anthropic's servers, outside agentcracker's proxy, so an
+agent steered by a malicious prompt can still send data out through
+them.  Only
+.B \-\-no\-net
+closes those channels (and with them the agent's own API access).  Keep
+secrets out of the project directory and the toolchain directories the
+guest can see.
 .PP
 Nothing flows from the guest to the host except the change record, the
 agent's transcripts and the network log.  Credentials are never copied

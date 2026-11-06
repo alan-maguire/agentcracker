@@ -899,7 +899,7 @@ port.  On exit, acinit stops stray processes, serialises the project's
 upper layer (files, dirs, symlinks, whiteouts, opaque dirs, permission
 bits only) and the agent state, then resets the VM, and Firecracker exits.
 
-**Firecracker.**  It's built from the submodule (pinned to `main` just after v1.17.0, reporting 1.18.0-dev) for the gnu target.
+**Firecracker.**  It's built from the submodule (pinned to the v1.17.0 release) for the gnu target.
 Firecracker only ships a seccomp policy for musl, so `make` compiles that
 policy with the glibc spellings of the same operations added (`epoll_wait`,
 `tgkill`, `FUTEX_WAIT_BITSET` variants, and the `TCGETS2`/`TCSETS2`
@@ -937,8 +937,17 @@ the agent's new loose objects and packs into a scratch repo, then does
 
 **Network.**  The default allowlist is `anthropic.com`, `claude.ai`,
 `claude.com` and their subdomains, port 443 only (`host:port` entries allow
-other ports).  Denied hosts show up in `agentcracker show` along with the
-`--allow` flag that would admit them.
+other ports); `--allow '*'` admits any host.  Denied hosts show up in
+`agentcracker show`, without a ready-made `--allow` command, since the
+agent chose them.
+
+The allowlist limits where the VM connects, not what leaves it.  Data can
+still go out through the allowed services themselves: the Anthropic API
+accepts any API key (so an injected prompt can send data to someone
+else's account), and server-side tools such as Claude Code's WebSearch run
+on Anthropic's servers, so their queries (and any URLs they fetch) never
+pass through agentcracker's proxy at all.  Only `--no-net` closes these
+channels, and it also cuts off the agent's API.
 
 **Tests.**  `tests/` holds standalone bash scripts sharing `tests/lib.sh`
 (logging, assertions, an isolated session store per test) and

@@ -316,7 +316,9 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
         "no network".to_string()
     } else {
         let extra: Vec<&String> = s.meta.allow.iter().filter(|a| !crate::config::DEFAULT_ALLOW.contains(&a.as_str())).collect();
-        if extra.is_empty() { "net: Anthropic API only".into() } else { format!("net: Anthropic API + {}", extra.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")) }
+        if s.meta.allow.iter().any(|a| a.trim() == "*") {
+            "net: ANY HTTPS host (--allow '*')".into()
+        } else if extra.is_empty() { "net: Anthropic API only".into() } else { format!("net: Anthropic API + {}", extra.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")) }
     };
     status(&format!("session {} · {} vCPU · {} · {}", s.meta.id, s.meta.vcpus, human_bytes(s.meta.mem_mib << 20), net));
     s.meta.status = "running".into();
@@ -677,11 +679,15 @@ fn cmd_show(arg: Option<&str>) -> Result<i32> {
             let host = &crate::util::safe_text(host.as_bytes(), false);
             let v = match (a, d) {
                 (a, 0) => format!("{a} allowed"),
-                (0, d) => format!("{d} denied (rerun with --allow {host})"),
+                (0, d) => format!("{d} denied"),
                 (a, d) => format!("{a} allowed, {d} denied"),
             };
             row(if first { "network" } else { "" }, format!("{host:<32} {v}"));
             first = false;
+        }
+        if net.iter().any(|(_, a, d)| *a == 0 && *d > 0) {
+            // the agent chose these names: no ready-made command to paste
+            row("", "denied hosts were requested by the agent; allow one with --allow HOST only if you expect this work to need it".into());
         }
     }
     let tr = changes::transcripts(&s);
