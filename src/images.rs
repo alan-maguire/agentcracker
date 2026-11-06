@@ -377,7 +377,7 @@ fn spawn_background_refresh() {
 /// inside one of these or contains one.
 const NEVER_TOOLS: &[&str] = &[
     ".ssh", ".gnupg", ".aws", ".azure", ".config", ".kube", ".docker", ".password-store",
-    ".mozilla", ".netrc", ".git-credentials", ".local/share/keyrings", ".claude",
+    ".mozilla", ".netrc", ".git-credentials", ".local/share/keyrings", ".claude", ".codex",
 ];
 
 /// Left out of the toolchain snapshot: caches and scratch space, and the

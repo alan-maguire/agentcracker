@@ -37,6 +37,7 @@ struct File {
     home: Option<Vec<String>>,
     state: Option<Vec<String>>,
     env: Option<Vec<String>>,
+    agent: Option<String>,
 }
 
 /// The effective configuration: built-in defaults with both config files
@@ -52,7 +53,8 @@ pub struct Config {
     /// it off for a session).
     pub net: bool,
     /// Egress allowlist: host names, `*.domain` wildcards, `host:port` entries
-    /// or `*` (see [`host_allowed`]).  Starts as [`DEFAULT_ALLOW`].
+    /// or `*` (see [`host_allowed`]), in addition to the agent profile's own
+    /// (see [`crate::agent`]).
     pub allow: Vec<String>,
     /// Patterns ([`Excludes`](crate::util::Excludes) syntax) left out of the
     /// project snapshot.
@@ -71,18 +73,10 @@ pub struct Config {
     pub state: Vec<String>,
     /// Extra environment variable names passed through to the guest command.
     pub env: Vec<String>,
+    /// The agent profile for commands that are not recognisably an agent
+    /// (a shell, `make`, ...); `None` means Claude Code.
+    pub agent: Option<&'static crate::agent::Profile>,
 }
-
-/// Endpoints Claude Code needs.  Anything else must be allowed explicitly,
-/// with `allow` in a config file or `--allow` on the command line.
-pub const DEFAULT_ALLOW: &[&str] = &[
-    "anthropic.com",
-    "*.anthropic.com",
-    "claude.ai",
-    "*.claude.ai",
-    "claude.com",
-    "*.claude.com",
-];
 
 /// Always excluded from the /usr snapshot: useless in a guest (kernel
 /// modules, firmware, debug info, kernel sources) or large and private
@@ -101,8 +95,9 @@ impl Config {
     /// Load the effective configuration for a session in `cwd`.
     ///
     /// Starts from the built-in defaults - vCPUs: host CPUs clamped to 1..=8;
-    /// memory: half of host RAM clamped to 1-8 GiB; network on with
-    /// [`DEFAULT_ALLOW`]; /usr excludes from [`DEFAULT_EXCLUDE_USR`] - then
+    /// memory: half of host RAM clamped to 1-8 GiB; network on (the agent
+    /// profile supplies the default allowlist); /usr excludes from
+    /// [`DEFAULT_EXCLUDE_USR`] - then
     /// merges the user config file and `cwd/.agentcracker.toml`, in that order.
     /// Missing files are skipped.
     ///
@@ -119,7 +114,7 @@ impl Config {
             vcpus: ncpu.clamp(1, 8),
             mem_mib: (mem_total_mib / 2).clamp(1024, 8192),
             net: true,
-            allow: DEFAULT_ALLOW.iter().map(|s| s.to_string()).collect(),
+            allow: vec![],
             exclude: vec![],
             exclude_usr: DEFAULT_EXCLUDE_USR.iter().map(|s| s.to_string()).collect(),
             tools: vec![],
@@ -127,6 +122,7 @@ impl Config {
             home: vec![],
             state: vec![],
             env: vec![],
+            agent: None,
         };
         for p in [crate::util::config_dir().join("config.toml"), cwd.join(".agentcracker.toml")] {
             if let Ok(text) = std::fs::read_to_string(&p) {
@@ -157,6 +153,10 @@ impl Config {
         }
         if let Some(n) = f.net {
             self.net = n;
+        }
+        if let Some(a) = f.agent {
+            let names: Vec<&str> = crate::agent::PROFILES.iter().map(|p| p.name).collect();
+            self.agent = Some(crate::agent::by_name(&a).ctx(format!("unknown agent {a:?} (known: {})", names.join(", ")))?);
         }
         let app = |dst: &mut Vec<String>, src: Option<Vec<String>>| dst.extend(src.unwrap_or_default());
         app(&mut self.allow, f.allow);

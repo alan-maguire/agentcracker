@@ -23,6 +23,7 @@
 //! - `util`: errors, paths, hashing, locking and formatting helpers
 
 mod activity;
+mod agent;
 mod changes;
 mod cli;
 mod config;

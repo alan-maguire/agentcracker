@@ -68,9 +68,9 @@ ac show --json "$id"
 assert_eq "$(echo "$AC_OUT" | json 'sorted((f["path"], f["status"], f["type"]) for f in d["changes"]["files"])')" \
     "[('j.txt', 'added', 'file'), ('jl', 'added', 'symlink')]" "show --json lists the changes"
 assert_eq "$(echo "$AC_OUT" | json '[f.get("points_outside") for f in d["changes"]["files"] if f["path"] == "jl"]')" "[True]" "...with the review flags"
-assert_eq "$(echo "$AC_OUT" | json 'sorted(d)')" \
-    "['applied_at', 'boots', 'changes', 'command', 'created', 'dir', 'disk', 'ended', 'error', 'exit_code', 'format', 'git', 'id', 'network', 'paths', 'running', 'runtime_secs', 'status', 'transcripts', 'vm']" \
-    "show --json has the documented fields"
+# fields may be added within a format, never removed: check they are all there
+assert_eq "$(echo "$AC_OUT" | json 'sorted(set(["agent", "applied_at", "boots", "changes", "command", "created", "dir", "disk", "ended", "error", "exit_code", "format", "git", "id", "network", "paths", "running", "runtime_secs", "status", "transcripts", "vm"]) - set(d))')" \
+    "[]" "show --json has the documented fields"
 ac ls --json
 assert_eq "$(echo "$AC_OUT" | json 'any(s["id"] == "'"$id"'" for s in d)')" "True" "ls --json lists sessions"
 # stdout is a pipe whose reader is already gone (`| head` would race:

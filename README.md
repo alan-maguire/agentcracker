@@ -9,7 +9,8 @@ $ make                    # builds firecracker (submodule), a guest kernel and
 $ make test               # optional: run tests/ against the build
 $ sudo make install       # copies into /usr/local (or: make install PREFIX=~/.local)
 $ cd ~/src/myproject
-$ agentcracker claude     # first run snapshots /usr (~30s on btrfs); after that
+$ agentcracker claude     # or: agentcracker codex
+                          # the first run snapshots /usr (~30s on btrfs); after that
                           # a VM is up in ~0.3s and gone ~0.3s after the agent exits
 ```
 
@@ -926,17 +927,29 @@ is passed with `--seccomp-filter`.  **The jailer is not used**: it needs
 root, which conflicts with the rootless goal.  Firecracker runs as the
 user, without a chroot or cgroup limits.
 
+**Agents.**  Each session uses an agent profile (`src/agent.rs`), chosen
+from the command (`claude`, `codex`, also behind `env`, `npx` or
+`sh -c`), else the `agent` config key, else Claude Code, and recorded in
+the session.  A profile supplies the default allowlist, which of the
+agent's files to copy into the guest, its login file, its transcripts and
+the environment variables to pass through.  Claude Code and OpenAI's Codex
+CLI have profiles; Codex's was written from its source (`$CODEX_HOME`,
+`auth.json`, `AGENTS.md`, session rollouts) and deliberately leaves out
+its other credential stores, memories and history.
+
 **Agent state.**  The guest `$HOME` lives on the scratch disk, so it
 survives `resume` and `shell`, along with anything the agent installed.  On first boot
-the guest gets Claude Code's settings, commands, agents, skills, plugins,
-this project's transcripts (so `claude --continue` works) and a
-`~/.claude.json` filtered to this project.  `.credentials.json` is
-refreshed on every boot.  On every exit, `~/.claude/projects` is exported
-to `<session>/state/`, where `agentcracker show` summarises it.  If the
-guest refreshes the OAuth token, agentcracker says so but never copies it
-to the host (see [Credentials](#credentials)); if refresh-token rotation
-then logs out Claude on the host, `/login` there fixes it.  Extra paths
-come from `home = [...]` and `state = [...]` in the config.
+the guest gets the agent's configuration: for Claude Code its settings,
+commands, agents, skills, plugins, this project's transcripts (so `claude
+--continue` works) and a `~/.claude.json` filtered to this project; for
+Codex its `config.toml`, `AGENTS.md`, skills, agents and rules.  The login
+(`.credentials.json`, `auth.json`) is refreshed on every boot.  On every
+exit the agent's transcripts are exported to `<session>/state/`, where
+`agentcracker show` and `agentcracker log` read them.  If the guest
+refreshes the login, agentcracker says so but never copies it to the host
+(see [Credentials](#credentials)); if refresh-token rotation then logs the
+agent out on the host, logging in again there fixes it.  Extra paths come
+from `home = [...]` and `state = [...]` in the config.
 
 **Apply.**  Implemented as described: confined `openat2` writes, temp file
 plus rename, setuid/setgid dropped, `.git/` internals never written,
@@ -951,9 +964,10 @@ conflict and is skipped, so applying twice is harmless.  `branch` writes only
 the agent's new loose objects and packs into a scratch repo, then does
 `git fetch` from it with `fetch.fsckObjects`.
 
-**Network.**  The default allowlist is `anthropic.com`, `claude.ai`,
-`claude.com` and their subdomains, port 443 only (`host:port` entries allow
-other ports); `--allow '*'` admits any host.  Denied hosts show up in
+**Network.**  The default allowlist is the agent profile's: `anthropic.com`,
+`claude.ai`, `claude.com` and their subdomains for Claude Code, `openai.com`
+and `chatgpt.com` and their subdomains for Codex; port 443 only (`host:port`
+entries allow other ports); `--allow '*'` admits any host.  Denied hosts show up in
 `agentcracker show`, without a ready-made `--allow` command, since the
 agent chose them.
 

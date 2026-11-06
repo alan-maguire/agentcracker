@@ -113,6 +113,10 @@ pub struct Meta {
     /// show`.
     #[serde(default)]
     pub error: Option<String>,
+    /// The agent profile the session uses (see [`crate::agent`]); `None`
+    /// for sessions from before profiles, which were Claude Code's.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// While a VM runs: the process id of the agentcracker process running
     /// it (`agentcracker stop` sends it SIGTERM).
     #[serde(default)]

@@ -5,9 +5,11 @@
 //! - `net.log`, written by the egress proxy: one line per connection
 //!   attempt (`<unix time> <verdict> <host:port>`).  Live while the session
 //!   runs.
-//! - Claude Code's transcripts (`state/.claude/projects/**/*.jsonl`, copied
-//!   out when the session ends): every tool call the agent made - shell
-//!   commands, file reads and edits, fetches and searches - with its time.
+//! - the agent's transcripts, copied out when the session ends: Claude
+//!   Code's (`.claude/projects/**/*.jsonl`) and Codex's session rollouts
+//!   (`.codex/sessions/**/rollout-*.jsonl`).  Every tool call the agent
+//!   made - shell commands, file reads and edits, fetches and searches -
+//!   with its time.
 //!
 //! Everything here comes from the guest and is untrusted: it is escaped
 //! for the terminal when rendered (see [`crate::util::safe_text`]).
@@ -53,11 +55,12 @@ pub fn net_events(path: &Path, from: u64) -> (Vec<Event>, u64) {
     (out, from + end as u64)
 }
 
-/// The agent's tool calls from the session's Claude Code transcripts
-/// (subagents' included), in no particular order.
+/// The agent's tool calls from the transcripts in the session's exported
+/// state (Claude Code's and Codex's, subagents' included), in no particular
+/// order.
 pub fn tool_events(s: &Session) -> Vec<Event> {
     let mut out = Vec::new();
-    let mut stack = vec![s.path("state/.claude/projects")];
+    let mut stack = vec![s.path("state")];
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.filter_map(|e| e.ok()) {
@@ -73,12 +76,20 @@ pub fn tool_events(s: &Session) -> Vec<Event> {
     out
 }
 
-/// Add the tool calls in one transcript file to `out`.
+/// Add the tool calls in one transcript file to `out`.  Each line is read
+/// as Codex's format if it is a `response_item` envelope, else as Claude
+/// Code's.
 fn transcript_events(path: &Path, out: &mut Vec<Event>) {
     let Ok(text) = std::fs::read_to_string(path) else { return };
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let Some(time) = v.get("timestamp").and_then(|t| t.as_str()).and_then(parse_iso8601) else { continue };
+        if v.get("type").and_then(|t| t.as_str()) == Some("response_item") {
+            if let Some(p) = v.get("payload") {
+                codex_events(time, p, out);
+            }
+            continue;
+        }
         let Some(blocks) = v.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) else { continue };
         for b in blocks {
             let ty = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -97,6 +108,63 @@ fn transcript_events(path: &Path, out: &mut Vec<Event>) {
             let server_side = ty == "server_tool_use" || name == "websearch";
             out.push(Event { time, kind: name, detail, verdict: None, server_side });
         }
+    }
+}
+
+/// Tool calls in one Codex `response_item` payload (see `ResponseItem` in
+/// Codex's `protocol/src/models.rs`): `function_call` (shell tools carry
+/// their command in a JSON `arguments` string, as `cmd` or `command`),
+/// `custom_tool_call` (`apply_patch`, whose patch names the files it adds,
+/// updates and deletes), `local_shell_call` and `web_search_call` (run by
+/// OpenAI, so never seen by the proxy).
+fn codex_events(time: f64, p: &serde_json::Value, out: &mut Vec<Event>) {
+    let s = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let words = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" "),
+        _ => String::new(),
+    };
+    let ev = |kind: &str, detail: String, server_side: bool| Event { time, kind: kind.into(), detail, verdict: None, server_side };
+    match p.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "function_call" => {
+            let name = s(p.get("name"));
+            let args: serde_json::Value = serde_json::from_str(&s(p.get("arguments"))).unwrap_or_default();
+            let cmd = args.get("cmd").or_else(|| args.get("command")).map(words).unwrap_or_default();
+            if !cmd.is_empty() {
+                out.push(ev("shell", cmd, false));
+            } else {
+                let detail = ["path", "file_path", "url", "query"].iter().find_map(|k| args.get(*k).and_then(|x| x.as_str())).unwrap_or("");
+                out.push(ev(&name.to_ascii_lowercase(), detail.to_string(), false));
+            }
+        }
+        "custom_tool_call" => {
+            let name = s(p.get("name"));
+            let input = s(p.get("input"));
+            if name == "apply_patch" {
+                for line in input.lines() {
+                    for (marker, kind) in [("*** Add File: ", "write"), ("*** Update File: ", "edit"), ("*** Delete File: ", "delete")] {
+                        if let Some(f) = line.strip_prefix(marker) {
+                            out.push(ev(kind, f.trim().to_string(), false));
+                        }
+                    }
+                }
+            } else {
+                out.push(ev(&name.to_ascii_lowercase(), input, false));
+            }
+        }
+        "local_shell_call" => {
+            let cmd = p.get("action").and_then(|a| a.get("command")).map(words).unwrap_or_default();
+            out.push(ev("shell", cmd, false));
+        }
+        "web_search_call" => {
+            let a = p.get("action");
+            let q = a.and_then(|a| a.get("query")).map(words).filter(|q| !q.is_empty())
+                .or_else(|| a.and_then(|a| a.get("queries")).map(words))
+                .or_else(|| a.and_then(|a| a.get("url")).map(words))
+                .unwrap_or_default();
+            out.push(ev("websearch", q, true));
+        }
+        _ => {}
     }
 }
 

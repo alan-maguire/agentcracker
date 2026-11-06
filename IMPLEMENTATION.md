@@ -413,8 +413,9 @@ reaches the host, and how each one is handled:
 What goes into the guest is limited too.  `/etc` is copied from an
 allowlist (`images::ETC_ALLOW`), toolchain roots never include
 credential directories (`images::NEVER_TOOLS`), and the environment is
-filtered (`vm::guest_env`).  `ANTHROPIC_*` variables are passed through,
-including `ANTHROPIC_API_KEY`, because the agent needs them.
+filtered (`vm::guest_env`).  The agent profile's variables
+(`ANTHROPIC_*`/`CLAUDE_CODE_*`, or `OPENAI_*`/`CODEX_*`) are passed
+through, API keys included, because the agent needs them.
 
 ## 7. Source guide
 
@@ -432,6 +433,7 @@ All source is in `src/`.
 | `proxy.rs` | Host side of the egress proxy. |
 | `proto.rs` | vsock frames and the file stream encoder/decoder. |
 | `guest.rs` | acinit: mounts, overlays, seed, proxy relay, command, export, poweroff. |
+| `agent.rs` | Agent profiles (Claude Code, Codex): hosts, seeded files, login, state, environment. |
 | `activity.rs` | The `log` timeline: network log and transcript tool calls. |
 | `changes.rs` | Change classification, diff, confined apply, branch import, agent state. |
 | `util.rs` | Errors, hashing, paths, locks, glob/excludes, formatting, prompts. |
@@ -439,6 +441,17 @@ All source is in `src/`.
 ### `main.rs`
 `main()`: runs `guest::main` as PID 1, otherwise `cli::run`.  Turns
 errors into `agentcracker: <msg>` and exit status 1.
+
+### `agent.rs`
+
+`Profile` describes one agent; `CLAUDE` and `CODEX` are the built-in
+ones.  `detect` picks one from the command (looking past `env`, `npx`,
+`sh -c` and similar), `for_session` from a session's recorded `agent`,
+and `Profile::path` resolves a path in the agent's directory, honouring
+`CODEX_HOME`.  `vm::first_boot_seed`, `vm::state_paths`,
+`vm::credential_path` and `vm::guest_env` take the profile;
+`changes::transcripts` reads Claude's or Codex's transcripts, and
+`activity::tool_events` both formats.
 
 ### `activity.rs`
 
@@ -574,6 +587,7 @@ format events, escaping the agent's text.
   | `t10-hostile-guest.sh` | credentials, terminal escapes, secrets in snapshots |
   | `t11-orchestration.sh` | `--detach`, `wait`, `stop`, `--json`, shells in a running session |
   | `t12-log.sh` | `log`: network and tool-call timeline, `-f`, `--json`, escaping |
+  | `t13-profiles.sh` | agent profiles: Codex seeding, login, environment, transcripts, selection |
 
   `AGENTCRACKER=/path/to/agentcracker make test` tests an installed copy.
   `.github/workflows/test.yml` runs `make test` on GitHub's Linux runners

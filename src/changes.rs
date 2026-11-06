@@ -156,11 +156,15 @@ pub fn is_sensitive(p: &[u8]) -> bool {
         "settings.gradle", "setup.cfg", "tox.ini", "noxfile.py", "pytest.ini", "Pipfile", "requirements.txt",
         "requirements-dev.txt", "Vagrantfile", ".travis.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml",
         ".gitconfig", ".lfsconfig",
+        // instructions every later agent run on this repository will follow
+        "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "GEMINI.md", ".cursorrules",
+        ".windsurfrules", ".clinerules",
     ];
     const EXTS: &[&str] = &[".mk", ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd", ".service", ".desktop"];
     const DIRS: &[&str] = &[
         ".vscode/", ".idea/", ".github/", ".husky/", ".devcontainer/", ".circleci/", ".claude/", ".cargo/",
         ".githooks/", ".gitlab/", ".buildkite/", ".gitea/", ".forgejo/", ".config/",
+        ".codex/", ".cursor/", ".gemini/", ".windsurf/", ".clinerules/",
     ];
     NAMES.contains(&name)
         || EXTS.iter().any(|e| name.ends_with(e))
@@ -1251,7 +1255,8 @@ pub fn extract_state(s: &Session) -> Result<()> {
 /// `s`: the session.  Returns true if the guest's credentials differ from
 /// the seeded ones.
 pub fn guest_refreshed_credentials(s: &Session) -> bool {
-    let guest = s.path("state").join(crate::vm::CRED_PATH);
+    let profile = crate::agent::for_session(s.meta.agent.as_deref());
+    let guest = s.path("state").join(crate::vm::credential_path(profile));
     let Ok(data) = std::fs::read(&guest) else { return false };
     let _ = std::fs::remove_file(&guest);
     let gh = crate::util::Fnv::new().bytes(&data).hex();
@@ -1289,7 +1294,11 @@ fn msg_text(v: &serde_json::Value) -> Option<String> {
 /// are left out.  `s`: the session.  Returns the summaries, ordered by
 /// their last message, oldest first.
 pub fn transcripts(s: &Session) -> Vec<Transcript> {
-    let root = s.path("state/.claude/projects");
+    let profile = crate::agent::for_session(s.meta.agent.as_deref());
+    if profile.name == "codex" {
+        return codex_transcripts(&s.path("state").join(profile.path(&crate::util::home(), "sessions")));
+    }
+    let root = s.path("state").join(profile.path(&crate::util::home(), "projects"));
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(&root) else { return out };
     for d in rd.filter_map(|e| e.ok()) {
@@ -1323,6 +1332,66 @@ pub fn transcripts(s: &Session) -> Vec<Transcript> {
                     if let Some(txt) = msg_text(&v) {
                         let txt = txt.trim();
                         if !txt.starts_with('<') && !txt.is_empty() {
+                            t.first_prompt = txt.replace('\n', " ");
+                        }
+                    }
+                }
+            }
+            if t.messages > 0 {
+                out.push(t);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.last.cmp(&b.last));
+    out
+}
+
+/// Summaries of Codex session rollouts (`sessions/YYYY/MM/DD/rollout-*.jsonl`
+/// below `root`): each line is `{"timestamp", "type", "payload"}`, and
+/// conversation turns are `response_item` lines whose payload is a
+/// `message` from the `user` or the `assistant`.  Codex's own context
+/// injections (`<environment_context>`, `<user_instructions>`, ...) are not
+/// taken as the first prompt.
+fn codex_transcripts(root: &Path) -> Vec<Transcript> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(p);
+                continue;
+            }
+            let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            if !name.starts_with("rollout-") || !name.ends_with(".jsonl") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            // rollout-<YYYY-MM-DDTHH-MM-SS>-<thread id>.jsonl
+            let stem = name.trim_end_matches(".jsonl");
+            let id = stem.get("rollout-YYYY-MM-DDTHH-MM-SS-".len()..).unwrap_or(stem).to_string();
+            let mut t = Transcript { id, messages: 0, first_prompt: String::new(), last: String::new() };
+            for line in text.lines() {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+                if v.get("type").and_then(|x| x.as_str()) != Some("response_item") {
+                    continue;
+                }
+                let Some(pl) = v.get("payload") else { continue };
+                let role = pl.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                if pl.get("type").and_then(|x| x.as_str()) != Some("message") || (role != "user" && role != "assistant") {
+                    continue;
+                }
+                t.messages += 1;
+                if let Some(ts) = v.get("timestamp").and_then(|x| x.as_str()) {
+                    t.last = ts.to_string();
+                }
+                if role == "user" && t.first_prompt.is_empty() {
+                    let text = pl.get("content").and_then(|c| c.as_array()).and_then(|c| {
+                        c.iter().find_map(|b| b.get("text").and_then(|x| x.as_str()))
+                    });
+                    if let Some(txt) = text.map(str::trim) {
+                        if !txt.is_empty() && !txt.starts_with('<') && !txt.starts_with("# AGENTS.md") {
                             t.first_prompt = txt.replace('\n', " ");
                         }
                     }

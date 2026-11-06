@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::agent::Profile;
 use crate::config::Config;
 use crate::images::{self, Refresh};
 use crate::proto::*;
@@ -53,51 +54,48 @@ pub struct Outcome {
 
 /// Paths below `$HOME` copied into the guest on the first boot of a session.
 ///
-/// These are Claude Code's user-level settings, `CLAUDE.md`, commands,
-/// agents, skills, plugins and output styles; git's user configuration;
-/// this project's Claude Code history directory
+/// These are git's user configuration; the agent profile's seed paths
+/// (its settings, instructions and extensions; see [`crate::agent`]); for
+/// Claude Code, this project's history directory
 /// (`~/.claude/projects/<cwd with every non-alphanumeric character replaced
-/// by '-'>`); and the configured `home` entries.
+/// by '-'>`) so `claude --continue` works; and the configured `home`
+/// entries.
 ///
-/// `cwd`: the project directory; `cfg`: supplies `home`.  Returns paths
-/// relative to `$HOME` (a leading `~/` is stripped from config entries).
-/// Paths that do not exist are skipped when the seed is built.
-fn first_boot_seed(cwd: &Path, cfg: &Config) -> Vec<String> {
-    let mangled: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let mut v: Vec<String> = [
-        ".claude/settings.json",
-        ".claude/CLAUDE.md",
-        ".claude/commands",
-        ".claude/agents",
-        ".claude/skills",
-        ".claude/plugins",
-        ".claude/output-styles",
-        ".gitconfig",
-        ".config/git/config",
-        ".config/git/ignore",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    v.push(format!(".claude/projects/{mangled}"));
+/// `cwd`: the project directory; `cfg`: supplies `home`; `p`: the agent
+/// profile.  Returns paths relative to `$HOME` (a leading `~/` is stripped
+/// from config entries).  Paths that do not exist are skipped when the seed
+/// is built.
+fn first_boot_seed(cwd: &Path, cfg: &Config, p: &Profile) -> Vec<String> {
+    let h = home();
+    let mut v: Vec<String> = [".gitconfig", ".config/git/config", ".config/git/ignore"].iter().map(|s| s.to_string()).collect();
+    v.extend(p.seed.iter().map(|s| p.path(&h, s)));
+    if p.name == "claude" {
+        let mangled: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        v.push(p.path(&h, &format!("projects/{mangled}")));
+    }
     v.extend(cfg.home.iter().map(|h| h.trim_start_matches("~/").to_string()));
     v
 }
 
 /// Paths below `$HOME` exported from the guest to the session store on exit:
-/// Claude Code's project transcripts, its credentials file (only to notice
-/// a refresh; see [`crate::changes::guest_refreshed_credentials`]), and the
-/// configured `state` entries.
+/// the agent profile's state (its transcripts), its credentials file (only
+/// to notice a refresh; see [`crate::changes::guest_refreshed_credentials`]),
+/// and the configured `state` entries.
 ///
-/// `cfg`: supplies `state`.  Returns paths relative to `$HOME`.
-pub fn state_paths(cfg: &Config) -> Vec<String> {
-    let mut v = vec![".claude/projects".to_string(), ".claude/.credentials.json".to_string()];
+/// `cfg`: supplies `state`; `p`: the agent profile.  Returns paths relative
+/// to `$HOME`.
+pub fn state_paths(cfg: &Config, p: &Profile) -> Vec<String> {
+    let h = home();
+    let mut v: Vec<String> = p.state.iter().map(|s| p.path(&h, s)).collect();
+    v.push(credential_path(p));
     v.extend(cfg.state.iter().map(|h| h.trim_start_matches("~/").to_string()));
     v
 }
 
-/// Claude Code's OAuth credentials file, relative to `$HOME`.
-pub const CRED_PATH: &str = ".claude/.credentials.json";
+/// The agent profile's login file, relative to `$HOME`.
+pub fn credential_path(p: &Profile) -> String {
+    p.path(&home(), p.credential)
+}
 
 /// Returns the FNV hash (as hex) of `p`'s contents, or `None` if it cannot
 /// be read.  Used to tell whether the credentials file changed.
@@ -110,17 +108,17 @@ pub fn hash_file(p: &Path) -> Option<String> {
 /// On a session's first boot (`first_boot`) it holds `~/.claude.json`,
 /// pruned under `projects` to this project's entry (the file keeps state
 /// for every project the user has), and the paths from
-/// [`first_boot_seed`].  On every boot it holds the credentials file
-/// ([`CRED_PATH`]), since the host copy may have been refreshed since the
+/// [`first_boot_seed`].  On every boot it holds the profile's credentials
+/// file ([`credential_path`]), since the host copy may have been refreshed since the
 /// last boot; otherwise later boots rely on the scratch disk, which still
 /// holds the guest's home.
 ///
 /// `cwd`: the project directory; `cfg`: the configuration.  Returns the
 /// encoded stream, in memory.
-fn build_seed(cwd: &Path, cfg: &Config, first_boot: bool) -> Result<Vec<u8>> {
+fn build_seed(cwd: &Path, cfg: &Config, first_boot: bool, p: &Profile) -> Result<Vec<u8>> {
     let h = home();
     let mut sw = StreamWriter::new(Vec::new());
-    if first_boot {
+    if first_boot && p.name == "claude" {
         // ~/.claude.json carries per-project state for every project; only
         // hand over the entry for this one.
         if let Ok(text) = std::fs::read(h.join(".claude.json")) {
@@ -136,14 +134,17 @@ fn build_seed(cwd: &Path, cfg: &Config, first_boot: bool) -> Result<Vec<u8>> {
             };
             sw.file(b".claude.json", 0o600, data.len() as u64, &mut &data[..])?;
         }
-        for p in first_boot_seed(cwd, cfg) {
-            if crate::util::safe_rel_path(p.as_bytes()).is_some() {
-                stream_tree(&mut sw, &h.join(&p), p.as_bytes())?;
+    }
+    if first_boot {
+        for rel in first_boot_seed(cwd, cfg, p) {
+            if crate::util::safe_rel_path(rel.as_bytes()).is_some() {
+                stream_tree(&mut sw, &h.join(&rel), rel.as_bytes())?;
             }
         }
     }
     // credentials every boot: the host copy may have been refreshed meanwhile
-    stream_tree(&mut sw, &h.join(CRED_PATH), CRED_PATH.as_bytes())?;
+    let cred = credential_path(p);
+    stream_tree(&mut sw, &h.join(&cred), cred.as_bytes())?;
     sw.end()?;
     Ok(sw.w)
 }
@@ -151,9 +152,10 @@ fn build_seed(cwd: &Path, cfg: &Config, first_boot: bool) -> Result<Vec<u8>> {
 /// Build the environment the command runs with in the guest.
 ///
 /// Passed through from the host: terminal and locale variables (`TERM`,
-/// `LANG`, `LC_*`, ...), editor and pager preferences, Claude Code settings
-/// (`ANTHROPIC_*`, `CLAUDE_CODE_*`, `DISABLE_*` - which includes
-/// `ANTHROPIC_API_KEY` when it is set) and the names listed in `cfg.env`.
+/// `LANG`, `LC_*`, ...), editor and pager preferences, `DISABLE_*`, the
+/// agent profile's prefixes (`ANTHROPIC_*` and `CLAUDE_CODE_*`, or
+/// `OPENAI_*` and `CODEX_*`: API keys and agent settings) and the names
+/// listed in `cfg.env`.
 /// Set explicitly: `HOME`, `USER`, `LOGNAME`, `SHELL`, the host's `PATH`,
 /// `PWD`, `AGENTCRACKER=1`, `AGENTCRACKER_SESSION=<id>`, `TERM` if it was
 /// missing, and, when `net` is true, `HTTPS_PROXY` and `HTTP_PROXY` (in
@@ -161,12 +163,12 @@ fn build_seed(cwd: &Path, cfg: &Config, first_boot: bool) -> Result<Vec<u8>> {
 ///
 /// `s`: the session (directory, id); `cfg`: the configuration; `net`:
 /// whether egress is enabled.  Returns `(name, value)` pairs.
-fn guest_env(s: &Session, cfg: &Config, net: bool) -> Vec<(String, String)> {
+fn guest_env(s: &Session, cfg: &Config, net: bool, p: &Profile) -> Vec<(String, String)> {
     let pass_exact = [
         "TERM", "COLORTERM", "LANG", "LANGUAGE", "TZ", "EDITOR", "VISUAL", "PAGER", "LESS", "NO_COLOR",
         "FORCE_COLOR", "CLICOLOR", "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
     ];
-    let pass_prefix = ["LC_", "ANTHROPIC_", "CLAUDE_CODE_", "DISABLE_"];
+    let pass_prefix: Vec<&str> = ["LC_", "DISABLE_"].into_iter().chain(p.env_prefixes.iter().copied()).collect();
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| {
             pass_exact.contains(&k.as_str())
@@ -428,6 +430,7 @@ pub fn console_tail(s: &Session, n: usize) -> String {
 /// failures come back as `Ok(Outcome)` with `error` set, so the exit status
 /// and partial results are still recorded.
 pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_boot: bool) -> Result<Outcome> {
+    let profile = crate::agent::for_session(s.meta.agent.as_deref());
     let fc_bin = images::find_asset("firecracker")?;
     let vmlinux = images::find_asset("vmlinux")?;
     let acinit = images::find_asset("acinit")?;
@@ -503,7 +506,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         user: crate::util::user_name(unsafe { libc::getuid() }),
         home: home().display().to_string(),
         cmd: cmd.to_vec(),
-        env: guest_env(s, cfg, net),
+        env: guest_env(s, cfg, net, profile),
         path: std::env::var("PATH").unwrap_or_default(),
         tty,
         rows,
@@ -511,7 +514,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         tools: tools.iter().map(|t| t.display().to_string()).collect(),
         dirs: ancestor_dirs(std::iter::once(s.meta.cwd.as_path()).chain(tools.iter().map(|t| t.as_path()))),
         net,
-        state_paths: state_paths(cfg),
+        state_paths: state_paths(cfg, profile),
         time: crate::util::now(),
         dev_usr: "/dev/vdb".into(),
         dev_tools: "/dev/vdc".into(),
@@ -519,9 +522,9 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         dev_scratch: "/dev/vde".into(),
         dev_lower_delta: lower_delta.as_ref().map(|_| "/dev/vdf".into()),
     };
-    let seed = build_seed(&s.meta.cwd, cfg, first_boot)?;
+    let seed = build_seed(&s.meta.cwd, cfg, first_boot, profile)?;
     crate::util::mark("home seed built");
-    s.meta.cred_seed = hash_file(&home().join(CRED_PATH));
+    s.meta.cred_seed = hash_file(&home().join(credential_path(profile)));
 
     let log = std::fs::OpenOptions::new().create(true).append(true).open(s.path("console.log"))?;
     let mut fc_cmd = Command::new(&fc_bin);

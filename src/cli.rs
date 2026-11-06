@@ -279,7 +279,10 @@ fn cmd_run(args: &[String]) -> Result<i32> {
         s.meta.vcpus = cfg.vcpus;
         s.meta.mem_mib = cfg.mem_mib;
         s.meta.net = cfg.net && !o.no_net;
-        s.meta.allow = cfg.allow.iter().chain(o.allow.iter()).cloned().collect();
+        // the agent profile: from the command, else the config, else Claude Code
+        let profile = crate::agent::detect(&o.rest).or(cfg.agent).unwrap_or(&crate::agent::CLAUDE);
+        s.meta.agent = Some(profile.name.to_string());
+        s.meta.allow = profile.allow.iter().map(|a| a.to_string()).chain(cfg.allow.iter().cloned()).chain(o.allow.iter().cloned()).collect();
         s.meta.git_head = git_head(&cwd);
         let lower = images::lower_image(&cfg, &cwd)?;
         crate::util::mark("project snapshot");
@@ -362,10 +365,15 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
     let net = if !s.meta.net {
         "no network".to_string()
     } else {
-        let extra: Vec<&String> = s.meta.allow.iter().filter(|a| !crate::config::DEFAULT_ALLOW.contains(&a.as_str())).collect();
+        let profile = crate::agent::for_session(s.meta.agent.as_deref());
+        let extra: Vec<&String> = s.meta.allow.iter().filter(|a| !profile.allow.contains(&a.as_str())).collect();
         if s.meta.allow.iter().any(|a| a.trim() == "*") {
             "net: ANY HTTPS host (--allow '*')".into()
-        } else if extra.is_empty() { "net: Anthropic API only".into() } else { format!("net: Anthropic API + {}", extra.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")) }
+        } else if extra.is_empty() {
+            format!("net: {} only", profile.api)
+        } else {
+            format!("net: {} + {}", profile.api, extra.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+        }
     };
     status(&format!("session {} · {} vCPU · {} · {}", s.meta.id, s.meta.vcpus, human_bytes(s.meta.mem_mib << 20), net));
     s.meta.status = "running".into();
@@ -400,10 +408,11 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
         eprintln!("agentcracker: could not save agent state: {e}");
     }
     if changes::guest_refreshed_credentials(s) {
-        status(
-            "Claude refreshed its login inside the VM; agentcracker never copies credentials back to the host. \
-             If Claude on the host later says you are logged out, run /login there.",
-        );
+        let a = crate::agent::for_session(s.meta.agent.as_deref()).display;
+        status(&format!(
+            "{a} refreshed its login inside the VM; agentcracker never copies credentials back to the host. \
+             If {a} on the host later says you are logged out, log in again there."
+        ));
     }
     s.save()?;
     crate::util::mark("post-processing");
@@ -768,6 +777,7 @@ fn cmd_show(args: &[String]) -> Result<i32> {
     if let Some(e) = &m.error {
         row("error", crate::util::safe_text(e.lines().next().unwrap_or("").as_bytes(), false));
     }
+    row("agent", crate::agent::for_session(m.agent.as_deref()).display.to_string());
     row(
         "vm",
         format!("{} vCPU · {} · {}", m.vcpus, human_bytes(m.mem_mib << 20), if m.net { format!("net allowlist: {}", m.allow.join(" ")) } else { "no network".into() }),
@@ -810,7 +820,8 @@ fn cmd_show(args: &[String]) -> Result<i32> {
     }
     let tr = changes::transcripts(&s);
     if !tr.is_empty() {
-        row("agent", format!("{} Claude transcript(s) (resume inside with: agentcracker resume {} claude --resume)", tr.len(), m.id));
+        let p = crate::agent::for_session(m.agent.as_deref());
+        row("history", format!("{} {} transcript(s) (resume inside with: agentcracker resume {} {})", tr.len(), p.display, m.id, p.resume));
         // transcripts are written by the guest: sanitise, and cut by chars
         let clip = |t: &str, n: usize| -> String {
             let t = crate::util::safe_text(t.as_bytes(), false);
@@ -821,7 +832,7 @@ fn cmd_show(args: &[String]) -> Result<i32> {
             let last = clip(&x.last, 64).chars().take(16).collect::<String>().replace('T', " ");
             row("", format!("{id} {:>4} msgs  last {last}  \"{}\"", x.messages, clip(&x.first_prompt, 60)));
         }
-        row("", format!("transcripts: {}", tilde(&s.path("state/.claude/projects"))));
+        row("", format!("transcripts: {}", tilde(&s.path("state").join(p.path(&crate::util::home(), p.state[0])))));
     }
     let (own, shared) = s.disk_usage();
     row(
@@ -973,6 +984,7 @@ fn session_brief(s: &Session) -> serde_json::Value {
         "id": m.id,
         "dir": m.cwd,
         "command": m.cmd,
+        "agent": crate::agent::for_session(m.agent.as_deref()).name,
         "status": status,
         "exit_code": m.exit_code,
         "running": running,
@@ -1071,7 +1083,10 @@ fn session_json(s: &Session) -> serde_json::Value {
             "session": s.dir,
             "stdout": opt("stdout"),
             "stderr": opt("stderr"),
-            "transcripts": opt("state/.claude/projects"),
+            "transcripts": opt(&format!("state/{}", {
+                let p = crate::agent::for_session(m.agent.as_deref());
+                p.path(&crate::util::home(), p.state[0])
+            })),
         }),
     );
     v

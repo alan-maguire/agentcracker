@@ -63,6 +63,8 @@ agentcracker \- run coding agents in disposable Firecracker microVMs
 .B agentcracker
 runs a command \(em typically a coding agent such as
 .BR claude (1)
+or
+.BR codex (1)
 \(em inside a throwaway Firecracker microVM, so that the agent can edit,
 build, test and install freely without being able to touch the host.
 .PP
@@ -477,6 +479,92 @@ Strings that come from the guest (paths, symlink targets, host names,
 transcript text) are the agent's: JSON escaping makes them safe to carry,
 not safe to act on.  A program reading this output \(em especially an agent
 \(em should treat them as untrusted data.
+.SH AGENTS
+Each session uses the profile of one agent, which decides the default
+network allowlist, which of the agent's files are copied into the guest,
+which environment variables are passed through, and which transcripts
+.B show
+and
+.B log
+read.  The profile is chosen from the command
+.RB ( claude ,
+.BR codex ,
+also behind
+.BR env ,
+.BR npx ,
+.B "sh \-c"
+and the like), else from the
+.B agent
+config key, else Claude Code; it is recorded in the session, so
+.B resume
+and
+.B shell
+keep it.
+.TP
+.B claude
+Allows
+.BR anthropic.com ,
+.B claude.ai
+and
+.B claude.com
+and their subdomains.  Copies in
+.IR ~/.claude/ 's
+.BR settings.json ,
+.BR CLAUDE.md ,
+commands, agents, skills, plugins and output styles, this project's
+transcripts and a
+.I ~/.claude.json
+pruned to this project; the login
+.RI ( .credentials.json )
+on every boot.  Keeps
+.IR ~/.claude/projects .
+Passes
+.B ANTHROPIC_*
+and
+.BR CLAUDE_CODE_* .
+.TP
+.B codex
+Allows
+.B openai.com
+and
+.B chatgpt.com
+and their subdomains.  Copies in
+.IR ~/.codex/ 's
+(or
+.BR $CODEX_HOME 's,
+when it is inside
+.IR $HOME )
+.BR config.toml ,
+.BR AGENTS.md ,
+.BR AGENTS.override.md ,
+skills, agents, rules and themes; the login
+.RI ( auth.json )
+on every boot.  Never its
+.IR secrets/ ,
+.IR gateway_oauth.json ,
+.I .credentials.json
+(other credentials),
+.IR memories/ ,
+.I history.jsonl
+or other sessions.  Keeps the session's rollouts
+.RI ( sessions/ ).
+Passes
+.B OPENAI_*
+and
+.BR CODEX_* .
+Log in on the host
+.RB ( "codex login" );
+the login is copied in.
+.PP
+For every agent, git's user configuration is copied in too, a login
+refreshed inside the guest is reported but never copied back, and files
+that instruct agents
+.RB ( CLAUDE.md ,
+.BR AGENTS.md ,
+.IR .codex/ ,
+.IR .cursor/ ,
+\&...) are flagged at review: every later agent run on the repository will
+follow them.
 .SH CONFIGURATION
 Settings are read from
 .I ~/.config/agentcracker/config.toml
@@ -524,9 +612,18 @@ saved into the session on every exit.
 .TP
 .BR env " = [\fInames\fR]"
 Extra environment variables passed into the guest (terminal, locale,
-editor, pager and
-.BR ANTHROPIC_* / CLAUDE_CODE_*
-variables are passed by default).
+editor, pager and the agent profile's variables are passed by default).
+.TP
+.BR agent " = \(dq\fIname\fR\(dq"
+The agent profile
+.RB ( claude
+or
+.BR codex )
+for commands that are not recognisably an agent, such as a shell
+(default:
+.BR claude ;
+see
+.BR AGENTS ).
 .SH ENVIRONMENT
 .TP
 .B PAGER
