@@ -70,7 +70,7 @@ options:
                  output goes to the session's stdout/stderr files
 
 config: ~/.config/agentcracker/config.toml and ./.agentcracker.toml
-  vcpus, memory, net, allow, exclude, exclude_usr, tools, no_tools, home, state, env
+  vcpus, memory, net, allow, exclude, exclude_usr, tools, no_tools, home, state, env, agent
 ";
 
 /// Options accepted before the command by `run`, `resume` and `shell`.
