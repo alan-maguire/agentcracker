@@ -13,6 +13,16 @@ $ agentcracker claude     # first run snapshots /usr (~30s on btrfs); after that
                           # a VM is up in ~0.3s and gone ~0.3s after the agent exits
 ```
 
+**Large trees.**  The first session in a directory snapshots the whole
+project, `.git` included.  For a kernel tree (about 90k files, 4.6G with
+history) that takes about 10s on btrfs; later sessions reuse the snapshot
+or add a small delta of what changed, and start in under a second.  On
+filesystems without reflinks (ext4, for example) the first snapshot
+really copies every byte, so it takes much longer and uses as much disk
+again as the tree.  Leave out build output you don't need in the VM with
+`exclude = [...]` in `.agentcracker.toml` (e.g. `exclude = ["*.o", "*.ko",
+"/vmlinux*"]`).
+
 Requirements: Linux x86_64, read/write access to `/dev/kvm` (the `kvm`
 group), `vhost_vsock`, and the build tools `make check-deps` lists (Rust,
 a C toolchain, kernel build deps, glibc-static, e2fsprogs).  The kernel

@@ -79,6 +79,19 @@ starts in well under a second once the
 .I /usr
 snapshot exists (the first run builds it, which takes tens of seconds).
 .PP
+The first session in a directory also snapshots the whole project,
+including
+.IR .git .
+For a large tree such as a Linux kernel checkout that takes about ten
+seconds on btrfs or XFS, where file data is shared by reflink, and much
+longer, using as much disk again as the tree, on filesystems without
+reflinks.  Later sessions reuse the snapshot, or add a small layer
+holding just what changed since, and start in under a second.  Build
+output the agent does not need can be left out with
+.B exclude
+(see
+.BR CONFIGURATION ).
+.PP
 Each run creates a
 .IR session :
 a directory holding the VM's writable disk, the project snapshot it
