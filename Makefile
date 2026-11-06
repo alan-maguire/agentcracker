@@ -27,7 +27,7 @@ AC_BIN      := target/release/agentcracker
 AC_INIT     := $(B)/acinit-target/$(HOST_TRIPLE)/release/agentcracker
 VMLINUX     := $(B)/vmlinux-$(KVER)
 
-.PHONY: all install uninstall check-deps firecracker kernel agentcracker seccomp test
+.PHONY: all install uninstall check-deps firecracker kernel agentcracker seccomp test FORCE
 
 all: check-deps firecracker kernel agentcracker seccomp
 
@@ -47,7 +47,16 @@ check-deps:
 # --- firecracker ------------------------------------------------------------
 firecracker: $(FC_BIN)
 
-$(FC_BIN):
+# The submodule commit this checkout pins, kept in a file that is only
+# rewritten when it changes, so pulling a new pin rebuilds firecracker (and,
+# through it, the seccomp filter) while an unchanged pin rebuilds nothing.
+FC_REV := $(B)/firecracker.rev
+$(FC_REV): FORCE
+	@mkdir -p $(B); rev=$$(git ls-tree HEAD firecracker | awk '{print $$3}'); \
+	  [ "$$(cat $@ 2>/dev/null)" = "$$rev" ] || echo "$$rev" > $@
+FORCE:
+
+$(FC_BIN): $(FC_REV)
 	git submodule update --init firecracker
 	@# firecracker's build script links against libseccomp; distros often ship
 	@# only the runtime .so.2, so provide an unversioned link for the linker.
@@ -56,6 +65,8 @@ $(FC_BIN):
 	  if [ -n "$$lib" ]; then ln -sf $$lib $(B)/libshim/libseccomp.so; fi
 	cd firecracker && LIBRARY_PATH=$(B)/libshim \
 	  cargo build --release --target $(HOST_TRIPLE) -p firecracker
+	@# cargo leaves an up-to-date binary untouched; mark it as current
+	touch $@
 
 # firecracker only ships a default seccomp policy for musl builds; compile
 # that policy (adapted for glibc) and pass it at runtime.

@@ -705,7 +705,11 @@ fn cmd_show(arg: Option<&str>) -> Result<i32> {
         }
         row("", format!("transcripts: {}", tilde(&s.path("state/.claude/projects"))));
     }
-    row("disk", human_bytes(s.disk_usage()));
+    let (own, shared) = s.disk_usage();
+    row(
+        "disk",
+        if shared > 0 { format!("{} (plus {} of project snapshot shared with the image cache)", human_bytes(own), human_bytes(shared)) } else { human_bytes(own) },
+    );
     row("files", tilde(&s.dir));
     Ok(0)
 }

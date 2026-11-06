@@ -244,26 +244,35 @@ impl Session {
         }
     }
 
-    /// Returns the disk space used by the files at the top of the session
-    /// directory, in bytes.
+    /// Disk space the session uses, as `(own, shared)` bytes of allocated
+    /// blocks (so the sparse 64 GiB scratch disk counts only what was
+    /// written).
     ///
-    /// Allocated blocks are counted, so the sparse 64 GiB scratch disk only
-    /// counts what was written.  `lower.img` is a hardlink shared with the image
-    /// cache but is counted anyway, since keeping the session is what keeps it
-    /// alive.  Subdirectories (`state/`, `tmp/`) count only their directory
-    /// entry, not their contents.
-    pub fn disk_usage(&self) -> u64 {
+    /// `own` is everything only this session holds, subdirectories such as
+    /// `state/` included.  `shared` is files hardlinked elsewhere - the
+    /// project snapshot and manifest, shared with the image cache and other
+    /// sessions - which removing the session does not free while those
+    /// links remain.
+    pub fn disk_usage(&self) -> (u64, u64) {
         use std::os::unix::fs::MetadataExt;
-        let mut total = 0;
-        if let Ok(rd) = std::fs::read_dir(&self.dir) {
+        let (mut own, mut shared) = (0, 0);
+        let mut stack = vec![self.dir.clone()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
             for e in rd.filter_map(|e| e.ok()) {
-                if let Ok(m) = e.metadata() {
-                    // lower.img is shared with the cache; count it anyway, it is what keeping costs
-                    total += m.blocks() * 512;
+                let Ok(m) = e.metadata() else { continue };
+                let bytes = m.blocks() * 512;
+                if m.is_dir() {
+                    own += bytes;
+                    stack.push(e.path());
+                } else if m.nlink() > 1 {
+                    shared += bytes;
+                } else {
+                    own += bytes;
                 }
             }
         }
-        total
+        (own, shared)
     }
 
     /// Delete the session directory and everything in it, consuming the session.
