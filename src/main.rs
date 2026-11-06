@@ -22,6 +22,7 @@
 //! - `changes`: interpreting, reviewing and safely applying the guest's changes
 //! - `util`: errors, paths, hashing, locking and formatting helpers
 
+mod activity;
 mod changes;
 mod cli;
 mod config;

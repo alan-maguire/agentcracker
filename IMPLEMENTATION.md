@@ -432,6 +432,7 @@ All source is in `src/`.
 | `proxy.rs` | Host side of the egress proxy. |
 | `proto.rs` | vsock frames and the file stream encoder/decoder. |
 | `guest.rs` | acinit: mounts, overlays, seed, proxy relay, command, export, poweroff. |
+| `activity.rs` | The `log` timeline: network log and transcript tool calls. |
 | `changes.rs` | Change classification, diff, confined apply, branch import, agent state. |
 | `util.rs` | Errors, hashing, paths, locks, glob/excludes, formatting, prompts. |
 
@@ -439,14 +440,25 @@ All source is in `src/`.
 `main()`: runs `guest::main` as PID 1, otherwise `cli::run`.  Turns
 errors into `agentcracker: <msg>` and exit status 1.
 
+### `activity.rs`
+
+The timeline behind `agentcracker log`: `net_events` parses `net.log`
+from a byte offset (so `-f` can follow it), `tool_events` collects tool
+calls from every transcript under `state/.claude/projects` (subagents'
+included), `parse_iso8601` reads their timestamps, and `render`/`json`
+format events, escaping the agent's text.
+
 ### `cli.rs`
 - `run`: dispatch, including the hidden `__seccomp-json` and `__mkimage`.
 - `cmd_run`: prepare a new session (§3.2) and boot it.
 - `boot_once`: one boot, with status and result recording (§3.3, §3.7).
 - `boot_and_review`, `review`, `apply_interactive`, `keep_msg`: the
   post-session menu (§3.8).
-- `cmd_resume` (also `shell`), `cmd_ls`, `cmd_show`, `cmd_diff`,
-  `cmd_apply`, `cmd_branch`, `cmd_rm`, `cmd_refresh`: one per subcommand.
+- `cmd_resume` (also `shell`, which runs `vm::exec_running` when the
+  session is up), `cmd_ls`, `cmd_show`, `cmd_log`, `cmd_diff`,
+  `cmd_apply`, `cmd_branch`, `cmd_wait`, `cmd_stop`, `cmd_rm`,
+  `cmd_refresh`: one per subcommand.
+- `run_detached`: `--detach`; `session_brief`/`session_json`: `--json`.
 - Helpers: `parse_opts`, `cwd`, `git_head`, `status_of`, `fmt_time`,
   `load_cs`.
 
@@ -561,6 +573,7 @@ errors into `agentcracker: <msg>` and exit status 1.
   | `t09-sessions.sh` | listing, lookup, show, removal |
   | `t10-hostile-guest.sh` | credentials, terminal escapes, secrets in snapshots |
   | `t11-orchestration.sh` | `--detach`, `wait`, `stop`, `--json`, shells in a running session |
+  | `t12-log.sh` | `log`: network and tool-call timeline, `-f`, `--json`, escaping |
 
   `AGENTCRACKER=/path/to/agentcracker make test` tests an installed copy.
   `.github/workflows/test.yml` runs `make test` on GitHub's Linux runners

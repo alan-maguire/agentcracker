@@ -25,6 +25,11 @@ agentcracker \- run coding agents in disposable Firecracker microVMs
 .RB [ \-\-json ]
 .RI [ session ]
 .br
+.B agentcracker log
+.RB [ \-\-json ]
+.RB [ \-f ]
+.RI [ session ]
+.br
 .B agentcracker diff
 .RI [ session ]
 .br
@@ -151,6 +156,24 @@ Everything recorded about a session: command, times, status and boot
 count, VM shape and network policy, the list of changes, each host it
 connected to or was refused (the agent chose those names: allow one only
 if the work really needs it), the agent's transcripts, and disk use.
+.TP
+.BR log " [\fB\-\-json\fR] [\fB\-f\fR] [\fIsession\fR]"
+The session's activity as one timeline, in local time: every connection
+attempt the agent made through the egress proxy, with its verdict
+.RB ( ALLOW ,
+.BR DENY ,
+\&...), and every tool call in the agent's Claude Code transcripts,
+subagents' included: shell commands, files read and edited, fetched URLs,
+web searches.  Searches run on Anthropic's servers and are marked as
+never seen by the proxy.  The proxy sees only
+.IR host : port
+\(em URLs and contents are inside TLS.  With
+.BR \-f ,
+a running session's network requests are printed as they happen; the
+tool calls follow when the session ends, which is when its transcripts
+are copied out.  With
+.BR \-\-json ,
+one object per event.  All text is the agent's and is shown escaped.
 .TP
 .BR diff " [\fIsession\fR]"
 Show the session's changes as a unified diff against the current host
@@ -337,7 +360,8 @@ instead.
 .SH JSON OUTPUT
 .BR "ls \-\-json" ,
 .BR "show \-\-json" ,
-.B "wait \-\-json"
+.BR "wait \-\-json" ,
+.B "log \-\-json"
 and
 .B "\-\-detach \-\-json"
 print JSON for scripts and orchestrators.  Every object carries
@@ -427,6 +451,27 @@ bytes) and
 .BR stdout ,
 .BR stderr ,
 .BR transcripts ).
+.PP
+.B log
+prints one object per line per event:
+.B time
+(Unix time, with fractions),
+.B kind
+.RB ( net ,
+or the tool's name in lower case:
+.BR bash ,
+.BR read ,
+.BR edit ,
+.BR webfetch ,
+.BR websearch ,
+\&...),
+.B detail
+(the target, command, file, URL or query),
+.B verdict
+(for
+.BR net )
+and
+.BR server_side .
 .PP
 Strings that come from the guest (paths, symlink targets, host names,
 transcript text) are the agent's: JSON escaping makes them safe to carry,
@@ -625,6 +670,17 @@ and the agent's history are all still there:
 $ agentcracker resume claude \-\-continue
 $ agentcracker shell          # look around yourself; exit when done
 $ agentcracker resume make test
+.EE
+.SS See what it did
+.EX
+$ agentcracker log
+15:42:01  bash      cargo build
+15:42:03  net       DENY   crates.io:443
+15:42:09  webfetch  https://docs.rs/erofs
+15:42:09  net       ALLOW  docs.rs:443
+15:42:12  websearch erofs extended inode layout  (server-side: not seen by the proxy)
+15:42:20  edit      /home/alan/src/myproject/src/parser.rs
+$ agentcracker log \-f 3f9a       # follow a running session
 .EE
 .SS Let it reach another host
 .EX

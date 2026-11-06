@@ -53,6 +53,7 @@ usage:
   agentcracker branch [SESSION]         turn the agent's git commits into a host branch
   agentcracker resume [SESSION] [command...]   boot again on the same overlay
   agentcracker shell  [SESSION]         open a shell inside the session (also while it runs)
+  agentcracker log    [--json] [-f] [SESSION]  timeline: network requests, agent tool calls
   agentcracker wait   [--json] [SESSION...]   wait for running sessions to end
   agentcracker stop   [SESSION...]      end running sessions (changes are kept)
   agentcracker rm     SESSION...        discard sessions
@@ -165,6 +166,7 @@ pub fn run(args: Vec<String>) -> Result<i32> {
         "ls" | "list" => cmd_ls(rest),
         "show" | "info" => cmd_show(rest),
         "wait" => cmd_wait(rest),
+        "log" => cmd_log(rest),
         "stop" => cmd_stop(rest),
         "diff" => cmd_diff(rest.first().map(|s| s.as_str())),
         "apply" => cmd_apply(rest.first().map(|s| s.as_str())),
@@ -1164,4 +1166,66 @@ fn cmd_stop(args: &[String]) -> Result<i32> {
         }
     }
     Ok(i32::from(!ok))
+}
+
+/// `agentcracker log [--json] [-f] [SESSION]`: the session's activity as
+/// one timeline - every connection attempt through the proxy and every
+/// tool call in the agent's transcripts (see [`crate::activity`]).
+///
+/// With `-f` on a running session, new network events are printed as they
+/// happen; the agent's tool calls follow when the session ends (that is
+/// when its transcripts are copied out).  Returns 0.
+fn cmd_log(args: &[String]) -> Result<i32> {
+    use crate::activity::{self, Event};
+    let (json, rest) = split_json(args);
+    let follow = rest.iter().any(|a| a == "-f" || a == "--follow");
+    let rest: Vec<String> = rest.into_iter().filter(|a| a != "-f" && a != "--follow").collect();
+    if let Some(a) = rest.iter().find(|a| a.starts_with('-')) {
+        crate::bail!("unknown option {a} (usage: agentcracker log [--json] [-f] [SESSION])");
+    }
+    let s = session::find(rest.first().map(|a| a.as_str()), &cwd()?)?;
+    let net = s.path("net.log");
+    let (mut events, mut off) = activity::net_events(&net, 0);
+    let tools = activity::tool_events(&s);
+    let seen: std::collections::HashSet<(u64, String, String)> = tools.iter().map(|e| (e.time.to_bits(), e.kind.clone(), e.detail.clone())).collect();
+    events.extend(tools);
+    events.sort_by(|a, b| a.time.total_cmp(&b.time));
+    // dates only when the timeline spans more than one day
+    let first = events.first().map(|e| e.time).unwrap_or(s.meta.created as f64);
+    let last = if follow { now() as f64 } else { events.last().map(|e| e.time).unwrap_or(first) };
+    let with_date = activity::clock(first, true)[..10] != activity::clock(last, true)[..10];
+    let emit = |e: &Event| {
+        if json {
+            out!("{}", activity::json(e));
+        } else {
+            out!("{}", activity::render(e, with_date));
+        }
+    };
+    for e in &events {
+        emit(e);
+    }
+    if follow && s.is_running() {
+        loop {
+            let running = s.is_running();
+            let (new, o) = activity::net_events(&net, off);
+            off = o;
+            new.iter().for_each(emit);
+            if !running {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let mut late: Vec<Event> = activity::tool_events(&s)
+            .into_iter()
+            .filter(|e| !seen.contains(&(e.time.to_bits(), e.kind.clone(), e.detail.clone())))
+            .collect();
+        late.sort_by(|a, b| a.time.total_cmp(&b.time));
+        if !late.is_empty() && !json {
+            out!("-- the agent's tool calls during the session (its transcripts are copied out when it ends) --");
+        }
+        late.iter().for_each(emit);
+    } else if events.is_empty() && !json {
+        eprintln!("no activity recorded for session {}", s.meta.id);
+    }
+    Ok(0)
 }

@@ -51,6 +51,7 @@ Everything else is a subcommand:
 agentcracker [--allow HOST]... [--no-net] [--console] [--detach] <command> [args...]
 agentcracker ls     [--json]         # sessions: age, status, changes, directory
 agentcracker show   [--json] [SESSION]   # changes, network log, Claude transcripts, disk use
+agentcracker log    [-f] [SESSION]   # timeline: network requests + the agent's tool calls
 agentcracker diff   [SESSION]
 agentcracker apply  [SESSION]
 agentcracker branch [SESSION]        # agent's commits -> branch agentcracker/<id>
