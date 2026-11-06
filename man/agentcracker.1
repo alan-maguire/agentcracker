@@ -1,0 +1,512 @@
+.\" Manual page for agentcracker.
+.\" View in the source tree with: man -l man/agentcracker.1
+.TH AGENTCRACKER 1 "November 2026" "agentcracker 0.1" "User Commands"
+.SH NAME
+agentcracker \- run coding agents in disposable Firecracker microVMs
+.SH SYNOPSIS
+.B agentcracker
+.RB [ \-\-allow
+.IR HOST ]...\&
+.RB [ \-\-no\-net ]
+.RB [ \-\-console ]
+.I command
+.RI [ args ...]
+.br
+.B agentcracker run
+.RI [ options ]
+.I command
+.RI [ args ...]
+.br
+.B agentcracker ls
+.br
+.B agentcracker show
+.RI [ session ]
+.br
+.B agentcracker diff
+.RI [ session ]
+.br
+.B agentcracker apply
+.RI [ session ]
+.br
+.B agentcracker branch
+.RI [ session ]
+.br
+.B agentcracker resume
+.RI [ options ]
+.RI [ session ]
+.RI [ command " [" args ...]]
+.br
+.B agentcracker shell
+.RI [ session ]
+.br
+.B agentcracker rm
+.IR session ...
+.br
+.B agentcracker refresh
+.RB [ \-\-background ]
+.SH DESCRIPTION
+.B agentcracker
+runs a command \(em typically a coding agent such as
+.BR claude (1)
+\(em inside a throwaway Firecracker microVM, so that the agent can edit,
+build, test and install freely without being able to touch the host.
+.PP
+The VM sees:
+.IP \(bu 2
+the current directory, at the same path, as a read-only snapshot with a
+writable layer on top: nothing the agent does reaches the real directory
+until it is applied;
+.IP \(bu 2
+the host's own
+.IR /usr ,
+the toolchains found on
+.B PATH
+under
+.I $HOME
+(rustup, nvm, the agent CLI itself, ...), and a small allowlisted part of
+.IR /etc ,
+all as read-only snapshots, so the agent finds the same tools as the user;
+.IP \(bu 2
+its own
+.IR $HOME ,
+seeded with the agent's settings and credentials but otherwise empty;
+.IP \(bu 2
+no network except HTTPS to allowed hosts, through a proxy on the host
+(the Anthropic API by default).
+.PP
+The agent runs as the invoking user, in a separate guest kernel.  The VM
+starts in well under a second once the
+.I /usr
+snapshot exists (the first run builds it, which takes tens of seconds).
+.PP
+Each run creates a
+.IR session :
+a directory holding the VM's writable disk, the project snapshot it
+started from, a record of what changed, the network log and the agent's
+transcripts.  When the command exits the VM powers off; on a terminal,
+agentcracker then lists the changes and offers a review menu (see
+.BR "REVIEW MENU" ).
+A session can be resumed, shelled into, diffed and applied at any time
+until it is removed.
+.SH COMMANDS
+A first argument that is not one of the subcommands below is the command
+to run.  Use
+.B run
+for a command whose name collides with a subcommand.
+.TP
+.BI run " command " \fR[\fIargs\fR...]
+Create a new session for the current directory and run
+.I command
+in it.  On a terminal the command gets a terminal of its own (sized like
+and resized with the host's) and the review menu follows; otherwise its
+standard input, output and error are plain pipes and a one-line summary
+of the changes is printed instead.  The exit status is the command's.
+.IP
+The current directory must not be
+.I /
+or an ancestor of
+.IR $HOME .
+.TP
+.B ls
+List all sessions, oldest first: id, age, status
+.RB ( running ,
+.BR exited ,
+.BI "exit " N\fR,
+.BR applied ,
+.B stopped
+when its host process died,
+.BR crashed ,
+.BR failed ),
+change counts (+added ~modified \-deleted), directory and command.
+.TP
+.BR show " [\fIsession\fR]"
+Everything recorded about a session: command, times, status and boot
+count, VM shape and network policy, the list of changes, each host it
+connected to (with the
+.B \-\-allow
+flag that would admit a denied one), the agent's transcripts, and disk use.
+.TP
+.BR diff " [\fIsession\fR]"
+Show the session's changes as a unified diff against the current host
+files, through
+.B $PAGER
+on a terminal.  Changes to files that were also changed on the host are
+marked
+.BR CONFLICT .
+.TP
+.BR apply " [\fIsession\fR]"
+Write the session's changes into its directory on the host.  If the host
+changed any of the same files since the session started, apply asks
+whether to skip those, overwrite them or cancel; without a terminal it
+refuses and changes nothing.  Changes the host already has are skipped,
+so applying twice is harmless.  See
+.BR "APPLYING CHANGES" .
+.TP
+.BR branch " [\fIsession\fR]"
+If the agent made git commits, import them into the host repository as
+branch
+.BI agentcracker/ session\fR.
+The current branch, index and work tree are not touched.
+.TP
+.BR resume " [\fIoptions\fR] [\fIsession\fR] [\fIcommand\fR [\fIargs\fR...]]"
+Boot the session again on the same writable disk, so earlier changes, the
+guest
+.I $HOME
+and anything installed are still there, and run
+.I command
+(by default the session's original command).  Changes accumulate across
+boots.
+.B \-\-allow
+adds hosts to the session's allowlist;
+.B \-\-no\-net
+turns its network off.
+.TP
+.BR shell " [\fIsession\fR]"
+Like
+.B resume
+with the user's login shell as the command.
+.TP
+.BI rm " session" \fR...
+Delete sessions and everything recorded for them.  The project directory
+is never touched.
+.TP
+.BR refresh " [" \-\-background ]
+Rebuild the
+.I /usr
+and toolchain snapshots now.  Snapshots are refreshed automatically when
+they go stale (the toolchain snapshot before the next boot, the
+.I /usr
+snapshot in the background while the old one keeps being used), so this
+is rarely needed.
+.SS Naming sessions
+A
+.I session
+argument is a session id or any unique prefix of one.  When it is
+omitted, the latest session for the current directory is used.
+.SH OPTIONS
+These come before the command (for a new session) or after
+.BR resume .
+.TP
+.BI \-\-allow " host"
+Also allow HTTPS to
+.IR host .
+.BI *. domain
+allows every subdomain of
+.I domain
+(but not
+.I domain
+itself);
+.IB host : port
+allows a port other than 443.  May be repeated.
+.TP
+.B \-\-no\-net
+No network at all.
+.TP
+.B \-\-console
+Show the guest kernel console (for debugging).
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.SH REVIEW MENU
+When a session's command exits and agentcracker is on a terminal, it
+prints the change list and a menu.  Each choice is a single letter
+followed by Enter:
+.TP
+.B d
+diff: show the changes, then return to the menu.
+.TP
+.B a
+apply: write the changes to the host (resolving conflicts if there are
+any), then ask whether to keep the session.
+.TP
+.B b
+branch: import the agent's git commits (offered only if it made some).
+.TP
+.B s
+shell: open a shell inside the session; exiting it returns to the menu.
+.TP
+.BR K " (default)"
+keep for later: leave the session as it is and apply nothing.  Use
+.BR "agentcracker apply" ,
+.B resume
+or
+.B rm
+on it later.
+.TP
+.B x
+discard: delete the session (after confirmation if it has unapplied
+changes).
+.PP
+Nothing reaches the project directory unless
+.B a
+(or the
+.B apply
+command) is chosen.
+.SH APPLYING CHANGES
+Each change is listed with a letter:
+.B A
+added,
+.B M
+modified (including permission-only changes),
+.B D
+deleted (a deleted directory shows how many entries it held).  Notes
+after an entry mark
+.B conflict
+(the host copy changed since the session started),
+.B "already on the host"
+and files that
+.B "run or configure tools on the host"
+(Makefile, package.json, .envrc, .github/, newly executable files, ...),
+which deserve review before applying.
+.PP
+Apply writes each file to a temporary name and renames it into place,
+never follows symlinks out of the project directory, drops setuid and
+setgid bits, and never writes inside
+.IR .git/ ;
+the agent's commits are brought over with
+.B branch
+instead.
+.SH CONFIGURATION
+Settings are read from
+.I ~/.config/agentcracker/config.toml
+and then from
+.I .agentcracker.toml
+in the project directory.  List values from both files are combined.
+.TP
+.BR vcpus " = \fIN\fR"
+vCPUs per VM (default: host CPUs, at most 8).
+.TP
+.BR memory " = \(dq\fISIZE\fR\(dq"
+Guest memory, e.g. \(dq4G\(dq or \(dq2048M\(dq (default: half of host
+RAM, between 1G and 8G).
+.TP
+.BR net " = true|false"
+Network on or off (default on).
+.TP
+.BR allow " = [\fIhosts\fR]"
+Extra allowed hosts, as for
+.BR \-\-allow .
+.TP
+.BR exclude " = [\fIpatterns\fR]"
+Paths left out of the project snapshot, gitignore style (a leading
+.B /
+anchors a pattern to the project root).
+.TP
+.BR exclude_usr " = [\fIpaths\fR]"
+Extra paths under
+.I /usr
+to leave out of its snapshot.
+.TP
+.BR tools " = [\fIdirs\fR]", " no_tools" " = [\fIdirs\fR]"
+Add or remove toolchain directories (beyond those found from
+.BR PATH ).
+.TP
+.BR home " = [\fIpaths\fR]"
+Extra paths under
+.I $HOME
+copied into the guest on a session's first boot.
+.TP
+.BR state " = [\fIpaths\fR]"
+Extra paths under the guest
+.I $HOME
+saved into the session on every exit.
+.TP
+.BR env " = [\fInames\fR]"
+Extra environment variables passed into the guest (terminal, locale,
+editor, pager and
+.BR ANTHROPIC_* / CLAUDE_CODE_*
+variables are passed by default).
+.SH ENVIRONMENT
+.TP
+.B PAGER
+Pager for
+.BR diff .
+.TP
+.BR XDG_STATE_HOME ", " XDG_CACHE_HOME ", " XDG_CONFIG_HOME ", " XDG_RUNTIME_DIR
+Base directories for sessions, cached images, configuration and sockets.
+.TP
+.B AGENTCRACKER_LIB
+Directory holding
+.BR acinit ,
+.BR firecracker ,
+.B vmlinux
+and
+.BR seccomp.bpf ,
+overriding the location next to the binary.
+.TP
+.B AGENTCRACKER_TIMING
+If set, print how long each startup and shutdown phase took.
+.TP
+.B AGENTCRACKER_FC_LOG
+Firecracker's log level (default
+.BR Error );
+its log goes to the session's
+.IR console.log .
+.PP
+Inside the guest,
+.B AGENTCRACKER=1
+and
+.B AGENTCRACKER_SESSION
+(the session id) are set, and the
+.B HTTPS_PROXY
+family points at the in-guest end of the egress proxy.
+.SH FILES
+.TP
+.I ~/.local/state/agentcracker/sessions/ID/
+One directory per session:
+.I meta.json
+(status, times, settings),
+.I lower.img
+and
+.I lower\-delta.img
+(the project snapshot, shared with the cache),
+.I manifest.bin
+(what the snapshot contained),
+.I scratch.img
+(the VM's writable disk),
+.I changes.stream
+(the changes, as exported on exit),
+.I state/
+(the agent's transcripts),
+.I net.log
+and
+.IR console.log .
+.TP
+.I ~/.cache/agentcracker/
+Cached images:
+.I usr/
+and
+.I tools/
+snapshots,
+.I base/
+(the guest root and init),
+.I lower/
+(project snapshots; unused ones are dropped after a week).
+.TP
+.IR PREFIX /lib/agentcracker/
+.B acinit
+(the guest's init),
+.BR firecracker ,
+.B vmlinux
+(the guest kernel) and
+.B seccomp.bpf
+(Firecracker's syscall filter).
+.SH EXIT STATUS
+For a new session,
+.B resume
+and
+.BR shell :
+the command's exit status (128 +
+.I N
+if it was killed by signal
+.IR N ),
+or 1 if the VM could not be started.  Other commands exit 0 on success,
+1 on error (including
+.B apply
+refusing because of conflicts) and 2 for a usage error.
+.SH EXAMPLES
+The life of one session, from start to finish.
+.SS Start an agent
+.EX
+$ cd ~/src/myproject
+$ agentcracker claude
+agentcracker: session 3f9a1c2e \(md 8 vCPU \(md 8.0G \(md net: Anthropic API only
+\&...                              (Claude Code runs in the VM)
+  M src/parser.rs
+  A src/parser/tests.rs
+  M Makefile  (runs or configures tools on the host \- review carefully)
+3 files changed: 2 modified, 1 added
+[d]iff [a]pply [s]hell [K]eep for later (not applied) [x] discard
+.EE
+.PP
+Press
+.B d
+to read the diff,
+.B a
+to apply it, or Enter to decide later:
+.EX
+agentcracker: kept session 3f9a1c2e, changes NOT applied:
+  agentcracker apply 3f9a1c2e | diff 3f9a1c2e | resume 3f9a1c2e | rm 3f9a1c2e
+.EE
+.SS Look at it later
+.EX
+$ agentcracker ls
+ID         AGE  STATUS   CHANGES      DIRECTORY             COMMAND
+3f9a1c2e   12m  exited   +1 ~2 \-0     ~/src/myproject       claude
+$ agentcracker show
+$ agentcracker diff | less
+.EE
+.SS Carry on where the agent stopped
+The session's disk, the guest
+.I $HOME
+and the agent's history are all still there:
+.EX
+$ agentcracker resume claude \-\-continue
+$ agentcracker shell          # look around yourself; exit when done
+$ agentcracker resume make test
+.EE
+.SS Let it reach another host
+.EX
+$ agentcracker show | grep denied
+network    crates.io                        3 denied (rerun with \-\-allow crates.io)
+$ agentcracker resume \-\-allow crates.io \-\-allow static.crates.io cargo build
+.EE
+.SS Apply the work
+.EX
+$ agentcracker apply
+  M src/parser.rs
+  A src/parser/tests.rs
+  M Makefile  (runs or configures tools on the host \- review carefully)
+agentcracker: applied to ~/src/myproject: 3 written, 0 deleted
+.EE
+.PP
+If a file was also edited on the host in the meantime:
+.EX
+These files changed on the host since the session started:
+  src/parser.rs
+[s]kip them and apply the rest, [o]verwrite them, or [c]ancel? s
+.EE
+.SS Take the agent's commits as a branch
+.EX
+$ agentcracker branch
+agentcracker: created branch agentcracker/3f9a1c2e (2 commit(s) on main)
+$ git log \-\-oneline main..agentcracker/3f9a1c2e
+.EE
+.SS Clean up
+.EX
+$ agentcracker rm 3f9a
+removed 3f9a1c2e
+.EE
+.SS Scripted use
+Without a terminal there is no menu: output goes to pipes and a summary
+line ends the run, so sessions can be driven from scripts.
+.EX
+$ agentcracker \-\-no\-net sh \-c \(aqmake test\(aq > test.log 2>&1; echo $?
+$ id=$(agentcracker ls | awk \(aqEND {print $1}\(aq)
+$ agentcracker diff "$id" > agent.patch
+$ agentcracker apply "$id" && agentcracker rm "$id"
+.EE
+.SH SECURITY
+The agent cannot see the host's files outside the project, the user's
+credentials (other than the agent's own), other repositories, or the
+network beyond the allowlist, and a compromise of the guest kernel
+stays inside the VM.  Firecracker itself runs as the invoking user under
+a seccomp filter, without its jailer (which needs root).
+.PP
+What the agent writes is untrusted until reviewed: read the diff before
+applying, especially entries flagged as running or configuring tools on
+the host, and treat a branch imported with
+.B branch
+like any other unreviewed contribution.
+.SH SEE ALSO
+.BR claude (1),
+.BR git (1),
+.BR firecracker (1)
+.PP
+.I README.md
+(design and rationale) and
+.I IMPLEMENTATION.md
+(how it works) in the agentcracker source.

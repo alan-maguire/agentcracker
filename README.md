@@ -51,7 +51,8 @@ agentcracker refresh                 # rebuild /usr + toolchain snapshots now
 ```
 
 `SESSION` is an id prefix and defaults to the latest session for the
-current directory.  See [Implementation notes](#implementation-notes) for
+current directory.  `man agentcracker` (or `man -l man/agentcracker.1` in the source
+tree) has the full reference and a worked example of a session's life.  See [Implementation notes](#implementation-notes) for
 how the build differs from the design below.
 
 ## Introduction

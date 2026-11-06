@@ -8,6 +8,7 @@
 PREFIX      ?= /usr/local
 BINDIR      := $(PREFIX)/bin
 LIBDIR      := $(PREFIX)/lib/agentcracker
+MANDIR      := $(PREFIX)/share/man/man1
 
 KVER        := 6.18.60
 KSHA256     := 3c2f44ef6acc021a7ad444d9a2e6ec1ef488ff09368793d0004a6080f69d621e
@@ -116,15 +117,16 @@ INSTALL_FILES := $(AC_BIN) $(AC_INIT) $(FC_BIN) $(VMLINUX) $(SECCOMP)
 install:
 	@for f in $(INSTALL_FILES); do test -e $$f || { \
 	  echo "$$f is missing; run 'make' (without sudo) first"; exit 1; }; done
-	install -d $(BINDIR) $(LIBDIR)
+	install -d $(BINDIR) $(LIBDIR) $(MANDIR)
 	install -m 0755 $(AC_BIN) $(BINDIR)/agentcracker
 	install -m 0755 $(AC_INIT) $(LIBDIR)/acinit
 	install -m 0755 $(FC_BIN) $(LIBDIR)/firecracker
 	install -m 0644 $(VMLINUX) $(LIBDIR)/vmlinux
 	install -m 0644 $(SECCOMP) $(LIBDIR)/seccomp.bpf
+	install -m 0644 man/agentcracker.1 $(MANDIR)/agentcracker.1
 	@echo "installed agentcracker into $(PREFIX)"
 
 uninstall:
-	rm -f $(BINDIR)/agentcracker
+	rm -f $(BINDIR)/agentcracker $(MANDIR)/agentcracker.1
 	rm -f $(LIBDIR)/acinit $(LIBDIR)/firecracker $(LIBDIR)/vmlinux $(LIBDIR)/seccomp.bpf
 	-rmdir $(LIBDIR)
