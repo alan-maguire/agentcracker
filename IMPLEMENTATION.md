@@ -1,0 +1,571 @@
+# agentcracker implementation guide
+
+This document describes how agentcracker works today, as code: the pieces,
+how a session flows through them, the formats they share, where the
+security boundaries are, and a guide to the source files.  `README.md`
+covers the design, its rationale and the alternatives considered.  This
+file covers the mechanics.
+
+Every source file opens with a module comment, and every function, type
+and constant has a doc comment covering its behaviour, parameters and
+return value.  To browse them as HTML:
+
+```
+cargo doc --document-private-items --open
+```
+
+## Contents
+
+1. [The pieces](#1-the-pieces)
+2. [Building and installing](#2-building-and-installing)
+3. [The life of a session](#3-the-life-of-a-session)
+4. [Files on disk](#4-files-on-disk)
+5. [Protocol and stream formats](#5-protocol-and-stream-formats)
+6. [Security boundaries](#6-security-boundaries)
+7. [Source guide](#7-source-guide)
+8. [Tests](#8-tests)
+9. [Debugging and development aids](#9-debugging-and-development-aids)
+10. [Making changes](#10-making-changes)
+
+## 1. The pieces
+
+```
+ host                                             guest (Firecracker microVM)
+ ----------------------------------------------   --------------------------------------
+ agentcracker (src/cli.rs ...)                     /acinit = agentcracker, static (src/guest.rs)
+   config, session store, image cache                mounts images, builds overlays
+   firecracker --no-api --config-file ...            chroots, runs the command in a pty
+   control connection   <==== vsock 1024 ====>       config, seed, terminal, export
+   egress proxy         <==== vsock 1025 ====>       127.0.0.1:3128 relay (HTTPS_PROXY)
+   review / apply / branch
+
+ block devices:  vda base.img (ro, root)   vdb usr.img (ro)   vdc tools.img (ro)
+                 vdd lower.img (ro)        vde scratch.img (rw, the only writable disk)
+```
+
+- **One binary, two roles.**  `agentcracker` is a single Rust crate.
+  `make` builds it twice: dynamically linked for the host, and statically
+  linked (`+crt-static`) as `acinit`, which is copied into the base image.
+  `main()` checks `getpid() == 1`: as PID 1 it runs `guest::main`,
+  otherwise `cli::run`.  So host and guest always agree on the protocol
+  and stream formats, which live in shared code (`src/proto.rs`).
+- **Firecracker** runs as the invoking user, without the jailer, with a
+  seccomp filter compiled at build time.  It is started with `--no-api`
+  and a JSON config file.  agentcracker never talks to its API socket.
+- **The guest kernel** is built from source by the Makefile (see "Kernel"
+  in `README.md`).  It has no modules and no initramfs.
+- **Images** are EROFS, written by agentcracker itself (`src/erofs.rs`),
+  and cached under `~/.cache/agentcracker`.  The **scratch disk** is a
+  sparse ext4 file per session.  It is the only writable device, and the
+  host never mounts it.
+- **The session store** (`~/.local/state/agentcracker/sessions/<id>/`)
+  holds everything about a session between and after boots.
+
+## 2. Building and installing
+
+`make` builds four artefacts as your user:
+
+| Artefact | Built from | Notes |
+|---|---|---|
+| `target/release/agentcracker` | this crate | the host CLI |
+| `build/acinit-target/.../agentcracker` | this crate, `+crt-static` | the guest init; installed as `acinit` |
+| `firecracker/build/.../firecracker` | the `firecracker` submodule | gnu target, linked against libseccomp |
+| `build/vmlinux-<KVER>` | kernel.org tarball (SHA-256 pinned) | Firecracker's CI config + `kernel/agentcracker.config` |
+| `build/seccomp.bpf` | Firecracker's musl policy, adapted | `agentcracker __seccomp-json` adds glibc's syscall spellings, then `seccompiler-bin` compiles it |
+
+`make install` (optionally `PREFIX=~/.local`) only copies files.  It
+never builds, so `sudo make install` cannot leave root-owned build output
+behind.  At run time `images::find_asset` locates `firecracker`,
+`vmlinux`, `acinit` and `seccomp.bpf` in `$AGENTCRACKER_LIB`, then next to
+the binary (`../lib/agentcracker`), and finally in a source checkout's
+build tree, so `target/release/agentcracker` works without installing.
+
+## 3. The life of a session
+
+What follows is `cd ~/src/proj && agentcracker claude`, step by step,
+naming the function that does each part.
+
+### 3.1 Command line (`cli.rs`)
+
+`cli::run` dispatches on the first argument.  Anything that is not a
+subcommand is a command to run, so it goes to `cmd_run`
+(`agentcracker run <cmd>` covers names that clash with subcommands).
+`parse_opts` takes `--allow`, `--no-net` and `--console`, and stops at
+the first non-option so the command's own flags are left alone.
+
+### 3.2 Preparing the session (`cli::cmd_run`)
+
+1. The current directory is canonicalised.  agentcracker refuses `/` or
+   any directory that contains `$HOME`.
+2. `Config::load` merges defaults, `~/.config/agentcracker/config.toml`
+   and `./.agentcracker.toml` (scalars override, lists append).
+3. `Session::create` makes a new directory with a random 8-hex-digit id
+   and writes `meta.json` (status `starting`).  `cmd_run` records vCPUs,
+   memory, network settings, the allowlist and the git `HEAD`.
+4. `images::lower_image` walks the project (`Tree::walk_into`, honouring
+   `exclude`) and records a manifest entry (path, mode, size, mtime,
+   inode) for every entry.  The cache key is a hash of that manifest, so
+   an unchanged tree reuses the cached image.  The image is hardlinked
+   into the session as `lower.img`, and the manifest is saved as
+   `manifest.json`.
+5. `images::create_scratch` formats a sparse 64 GiB ext4 file,
+   `scratch.img`, with `mkfs.ext4`.
+
+If any step fails, the half-made session directory is removed.
+
+### 3.3 Booting (`cli::boot_once` → `vm::boot`)
+
+`boot_once` takes the session lock (`flock` on `lock`), marks the session
+`running` and calls `vm::boot`, which:
+
+1. finds the installed assets and checks `/dev/kvm`;
+2. gets the shared images, building them only if needed:
+   - `base_image`: `/acinit`, mount points, usr-merge symlinks, an
+     allowlisted copy of host `/etc`, and generated
+     `passwd`/`group`/`hosts`/`hostname`/`resolv.conf`;
+   - `usr_image`: host `/usr`.  If only an older snapshot exists it is
+     used straight away, and a detached `agentcracker refresh --background`
+     rebuilds the new one;
+   - `detect_tools` + `tools_image`: toolchain roots outside `/usr`,
+     found from `$PATH` (e.g. `~/.cargo` and `~/.rustup`, `~/.nvm`,
+     `~/.local/share/claude`), never credential directories;
+3. creates a runtime directory (`$XDG_RUNTIME_DIR/agentcracker/<id>/`),
+   binds the unix sockets Firecracker forwards vsock ports to
+   (`v.sock_1024` for control, `v.sock_1025` for the proxy) and starts the
+   proxy (`proxy::serve`);
+4. writes `firecracker.json`: kernel and boot arguments
+   (`root=/dev/vda ro rootfstype=erofs init=/acinit`, plus `quiet` unless
+   `--console`), the five drives in a fixed order, vCPUs and memory
+   (SMT off), vsock (guest CID 3) and an entropy device;
+5. builds the `GuestConfig` (identity, cwd, command, environment from
+   `guest_env`, tools, ancestor directory owners, device names) and the
+   home seed (`build_seed`: Claude Code settings and credentials, a
+   `~/.claude.json` pruned to this project, git config);
+6. starts Firecracker, with its output appended to `console.log`, and
+   calls `attach`.
+
+### 3.4 Inside the guest (`guest.rs`)
+
+The kernel mounts `base.img` read-only as `/` and runs `/acinit`.
+`guest::run`:
+
+1. mounts `/proc`, `/sys`, `/dev`, `/dev/pts` and `/dev/shm`;
+2. connects to the host on vsock port 1024 (retrying for up to 5 s) and
+   reads the CONFIG frame;
+3. sets the clock from the host's time and the hostname to
+   `agentcracker`;
+4. mounts the scratch disk at `/scratch` and the read-only images under
+   `/lower/{usr,tools,proj}`, and bind-mounts `/` at `/lower/base`;
+5. builds `/newroot` from overlays, each with its upper and work
+   directories on scratch (`overlay()`), mounted with `redirect_dir`,
+   `metacopy`, `index` and `xino` all off:
+
+   | Mount point | Lower | Upper |
+   |---|---|---|
+   | `/newroot` | `/lower/base` | `/scratch/root/upper` |
+   | `/newroot/usr` | `/lower/usr` | `/scratch/usr/upper` |
+   | `/newroot/<tool root>` | `/lower/tools/<root>` | `/scratch/tools/<i>/upper` |
+   | `/newroot/<cwd>` | `/lower/proj` | `/scratch/proj/upper` |
+
+   Missing parent directories are created with the owners and modes the
+   host reported (`mkdirs_mirror`), so paths like `/tmp/claude-1000`
+   keep the right owner;
+6. mounts proc, sysfs, cgroup2, `/dev` and a tmpfs `/run` inside the new
+   root, and brings up loopback;
+7. receives the SEED frames into `/scratch/seed.stream` and unpacks them
+   into the user's home (`extract_seed`);
+8. with networking, starts the proxy listener on `127.0.0.1:3128`
+   (`start_proxy`): each local connection is spliced to a new vsock
+   connection on port 1025;
+9. starts the command (`spawn`): fork, `setsid`, chroot into `/newroot`,
+   chdir to the project, drop to the user's uid/gid, `execve` along
+   `$PATH`.  It gets a pty when the host side is a terminal, pipes
+   otherwise; then acinit sends READY.
+
+### 3.5 Running
+
+On the host, `vm::attach` puts the terminal in raw mode.  A thread
+(`stdin_pump`) sends stdin as STDIN frames and window changes, picked up
+by a SIGWINCH self-pipe, as RESIZE frames.  The main loop writes STDOUT
+and STDERR frames to the terminal.
+
+In the guest, one thread per output stream sends STDOUT/STDERR frames.
+Another applies STDIN, STDIN_EOF and RESIZE frames, and sends SIGHUP to
+the command's process group if the host goes away.  The main thread
+reaps every process (as PID 1 must) until the command exits.
+
+All network traffic goes through the proxy.  `proxy::handle` reads
+`CONNECT host:port`, checks it with `config::host_allowed` (port 443
+unless `host:port` is listed), resolves and connects on the host, then
+copies bytes without reading them.  Every decision goes to `net.log`.
+
+### 3.6 Shutdown and export (`guest::run`, after the command exits)
+
+1. Remaining output gets 0.5 s to drain; every other process gets SIGTERM,
+   then SIGKILL 0.2 s later; output gets another 0.5 s; then filesystems
+   are synced.
+2. EXIT is sent with the exit status (128 + signal if the command was
+   killed by a signal).
+3. `export_upper` walks `/scratch/proj/upper` and streams it as EXPORT
+   frames.  Whiteouts (char devices 0:0) become deletions, directories
+   with `trusted.overlay.opaque=y` become opaque records, and files and
+   symlinks are sent in full.  Then EXPORT_END.
+4. The agent state paths (`~/.claude/projects`, the credentials file and
+   configured `state` entries) are streamed as STATE frames, then
+   STATE_END.
+5. DONE is sent, and `poweroff()` resets the VM.  With `reboot=k`,
+   Firecracker exits.
+
+The host writes the two streams to `changes.stream.tmp` and
+`state.stream.tmp` and renames each into place when its end marker
+arrives.  `vm::boot` waits up to 5 s for Firecracker to exit (then kills
+it), removes the runtime directory and returns an `Outcome`.
+
+### 3.7 After the VM stops (`cli::boot_once`)
+
+`boot_once` records the end time, exit code and status (`exited`, or
+`crashed` if no exit status arrived), then:
+
+- `ChangeSet::load` + `summary` record change counts in `meta.json`;
+- `changes::extract_state` unpacks `state.stream` into `state/`;
+- `changes::sync_credentials` writes a token the guest refreshed back to
+  `~/.claude/.credentials.json`, but only if the host copy is still the
+  one that was seeded.
+
+### 3.8 Review, apply and branch (`cli::review`, `changes.rs`)
+
+`ChangeSet::from_stream` classifies each streamed entry against the
+manifest and against the host as it is now:
+
+- **Added, Modified, Deleted**: copy-ups that changed nothing (same
+  content and mode as the host) are dropped.  A mode-only change is
+  marked as such.  An opaque directory is expanded into deletions of
+  whatever the snapshot had beneath it.
+- **Conflict**: the host entry changed after the snapshot (by mode,
+  inode, size or mtime) or, for an added path, appeared since.
+- **Sensitive**: build files, CI and editor config, dotfiles, `.claude/`
+  and the like, and newly executable files.  These are highlighted, not
+  blocked.
+- **`.git/`** entries are kept separately.  They are never applied.
+
+The review menu offers diff (`render_diff` runs `diff -u` per file and
+pages the output), apply, branch, shell (boot again with the user's
+shell), keep and discard.
+
+**Apply** (`changes::apply`) deletes first, then creates in stream
+order.  Every write goes through `Confined`: the parent directory is
+opened with `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+RESOLVE_NO_MAGICLINKS)`, data goes to a temporary file
+(`O_EXCL | O_NOFOLLOW`) that is renamed over the target, and only
+`mode & 0777` is kept.  Conflicts are skipped unless the user chooses to
+overwrite them.
+
+**Branch** (`changes::import_branch`) copies only the agent's object
+files (loose objects and packs, names validated) out of the stream into
+a bare scratch repository, which borrows the host's objects via
+`alternates`.  The host repository then fetches the agent's HEAD from it
+with `fetch.fsckObjects` into `agentcracker/<id>`.
+
+### 3.9 Later: resume, shell, show, rm
+
+`resume` and `shell` (`cli::cmd_resume`) boot the same session again.
+The scratch disk still holds the overlay upper layers and the guest
+home, so the agent sees its earlier work.  The project is **not**
+snapshotted again.  Only the credentials are re-seeded.  `ls`, `show`,
+`diff`, `apply`, `branch` and `rm` read the session store.  `rm`
+refuses while a session's lock is held.
+
+## 4. Files on disk
+
+```text
+$PREFIX/bin/agentcracker
+$PREFIX/lib/agentcracker/{acinit,firecracker,vmlinux,seccomp.bpf}
+
+~/.cache/agentcracker/               ($XDG_CACHE_HOME)
+  base/base-<key>.img                base root; key: user, acinit mtime, /etc, symlinks
+  usr/usr-<key>.img                  /usr; key: package DBs + directory mtimes
+  tools/tools-<key>.img              toolchains; key: roots + directory mtimes
+  lower/<key>.img                    project snapshots; key: manifest hash
+  {base,usr,tools}/lock              serialises builders
+  refresh.log                        output of background /usr rebuilds
+
+~/.local/state/agentcracker/sessions/<id>/   ($XDG_STATE_HOME)
+  meta.json  manifest.json  lower.img  scratch.img  changes.stream
+  state.stream  state/  console.log  net.log  lock  tmp/
+
+$XDG_RUNTIME_DIR/agentcracker/<id>/  (or /tmp/agentcracker-<uid>/<id>/)
+  firecracker.json  v.sock  v.sock_1024  v.sock_1025     (only while booted)
+```
+
+Cached images are replaced atomically (temporary file + rename) and older
+ones are deleted under the lock.  A running VM keeps its open file, so
+that is safe.  Project snapshots that no session hardlinks are removed
+after a week unused.
+
+## 5. Protocol and stream formats
+
+### Control frames (vsock port 1024)
+
+A frame is `type: u8`, `len: u32` big-endian, then `len` bytes (at most
+16 MiB).  Constants are `proto::M_*`.
+
+| # | Name | Direction | Payload |
+|---|---|---|---|
+| 1 | CONFIG | host → guest | `GuestConfig` as JSON |
+| 2, 3 | SEED, SEED_END | host → guest | home seed file stream |
+| 4 | STDIN | host → guest | terminal input |
+| 5 | RESIZE | host → guest | rows `u16`, cols `u16` |
+| 6 | STDIN_EOF | host → guest | — |
+| 10 | READY | guest → host | — |
+| 11 | ERROR | guest → host | UTF-8 message; the guest powers off |
+| 12 | STDOUT | guest → host | command output |
+| 13 | EXIT | guest → host | exit status `i32` |
+| 14, 15 | EXPORT, EXPORT_END | guest → host | project upper layer file stream |
+| 16, 17 | STATE, STATE_END | guest → host | agent state file stream |
+| 18 | DONE | guest → host | — |
+| 19 | STDERR | guest → host | command stderr (non-tty only) |
+
+Order: CONFIG, SEED*, SEED_END → READY → (STDOUT/STDERR ↔ STDIN/RESIZE)*
+→ EXIT → EXPORT*, EXPORT_END → STATE*, STATE_END → DONE.
+
+### Proxy connections (vsock port 1025)
+
+Each is a raw TCP byte stream from a guest client: an HTTP `CONNECT`
+request followed, if allowed, by the tunnelled TLS bytes.
+
+### File stream
+
+Used for the home seed, the change export and the agent state.  Each
+record is a tag byte followed by fields.  Strings are a `u32` length plus
+bytes, modes are `u32` (permission bits only), sizes are `u64`, all
+big-endian:
+
+```text
+'D' path mode             directory
+'F' path mode size data   regular file
+'L' path target           symlink
+'X' path                  deletion (overlay whiteout)
+'O' path mode             opaque directory (replaces the lower one)
+'E'                       end
+```
+
+There are no owners, devices, xattrs or hard links.  `StreamReader`
+rejects any path that `util::safe_rel_path` does not accept (absolute,
+empty or `.`/`..` components, NUL bytes, over 4096 bytes or a component
+over 255).  The host never extracts the change stream as a whole.  It
+reads file data by offset (`StreamReader::offset`) when it diffs or
+applies.
+
+## 6. Security boundaries
+
+The guest is assumed hostile.  These are the places where its output
+reaches the host, and how each one is handled:
+
+| Channel | Guard |
+|---|---|
+| Block devices | Only `scratch.img` is writable, and the host never mounts or parses it. |
+| Control frames | Length-capped (16 MiB); unknown frame types ignored; the guest's config cannot be changed by the guest. |
+| `changes.stream` | Parsed with path validation; data read by offset; applied only on request, through `Confined` (`openat2` beneath the project, no symlinks, temporary file + rename, `mode & 0777`); `.git/` never written; conflicts skipped unless the user chooses to overwrite. |
+| Git objects | Only object files with validated names; imported via `git fetch` with `fsckObjects`; no guest hooks, config or refs used. |
+| `state.stream` | Unpacked with `Confined` into the session's `state/`; symlinks and deletions ignored. |
+| Credentials | Written back only if the host copy still matches what was seeded and the new file looks like Claude Code credentials. |
+| Network | No NIC; HTTPS `CONNECT` only, to allowlisted hosts (port 443 unless `host:port` is listed); DNS resolved on the host; decisions logged. |
+| Firecracker | Runs as the user, with the compiled seccomp filter.  **No jailer**: it needs root, which conflicts with the rootless goal, so there is no chroot or cgroup limit around the VMM. |
+
+What goes into the guest is limited too.  `/etc` is copied from an
+allowlist (`images::ETC_ALLOW`), toolchain roots never include
+credential directories (`images::NEVER_TOOLS`), and the environment is
+filtered (`vm::guest_env`).  `ANTHROPIC_*` variables are passed through,
+including `ANTHROPIC_API_KEY`, because the agent needs them.
+
+## 7. Source guide
+
+All source is in `src/`.
+
+| File | Role |
+|---|---|
+| `main.rs` | Entry point; picks the host or guest role. |
+| `cli.rs` | Subcommands, the run → boot → review loop, session queries. |
+| `config.rs` | Config files, defaults, the allowlist matcher. |
+| `session.rs` | The session store: `meta.json`, manifest, locking, lookup. |
+| `images.rs` | Building and caching base/usr/tools/project images; scratch disk; asset lookup. |
+| `erofs.rs` | The EROFS writer: in-memory tree, host walk, image layout, reflink copy. |
+| `vm.rs` | Firecracker config and launch, home seed, guest environment, terminal attach. |
+| `proxy.rs` | Host side of the egress proxy. |
+| `proto.rs` | vsock frames and the file stream encoder/decoder. |
+| `guest.rs` | acinit: mounts, overlays, seed, proxy relay, command, export, poweroff. |
+| `changes.rs` | Change classification, diff, confined apply, branch import, agent state. |
+| `util.rs` | Errors, hashing, paths, locks, glob/excludes, formatting, prompts. |
+
+### `main.rs`
+`main()`: runs `guest::main` as PID 1, otherwise `cli::run`.  Turns
+errors into `agentcracker: <msg>` and exit status 1.
+
+### `cli.rs`
+- `run`: dispatch, including the hidden `__seccomp-json` and `__mkimage`.
+- `cmd_run`: prepare a new session (§3.2) and boot it.
+- `boot_once`: one boot, with status and result recording (§3.3, §3.7).
+- `boot_and_review`, `review`, `apply_interactive`, `keep_msg`: the
+  post-session menu (§3.8).
+- `cmd_resume` (also `shell`), `cmd_ls`, `cmd_show`, `cmd_diff`,
+  `cmd_apply`, `cmd_branch`, `cmd_rm`, `cmd_refresh`: one per subcommand.
+- Helpers: `parse_opts`, `cwd`, `git_head`, `status_of`, `fmt_time`,
+  `load_cs`.
+
+### `config.rs`
+- `Config::load` / `merge`: defaults plus both files.
+- `host_allowed`: allowlist matching (`*`, `*.domain`, exact,
+  `host:port`).
+- `expand`: `~` expansion.  `DEFAULT_ALLOW` and `DEFAULT_EXCLUDE_USR`.
+
+### `session.rs`
+- `Session::create`, `load_dir`, `save` (atomic), `save_manifest`,
+  `manifest`, `lock`, `is_running`, `disk_usage`, `remove`.
+- `list`, `find` (id prefix or latest for the directory),
+  `looks_like_id`.
+- `Meta` and `Summary`: the `meta.json` schema.
+
+### `images.rs`
+- `find_asset` (with `kernel_version_key`): locate installed files.
+- `usr_image`, `usr_key`, `spawn_background_refresh`, `Refresh`: the
+  `/usr` snapshot.
+- `detect_tools`, `tool_root_for`, `tools_image`, `NEVER_TOOLS`:
+  toolchains.
+- `base_image`, `etc_tree`, `ETC_ALLOW`: the root image.
+- `lower_image`, `gc_lower`, `Lower`: the project snapshot.
+- `create_scratch`: the scratch disk.
+- Cache helpers: `mtime_sig`, `dir_sig`, `newest`, `remove_others`.
+  Also `status` for progress messages.
+
+### `erofs.rs`
+- `Tree`, `Node`, `Kind`, `Content`: the in-memory tree (`add`, `child`,
+  `mkdir_p`, `mkdir_p_at`).
+- `Tree::walk_into`: host directory to tree, with excludes, hard links,
+  manifest and `WalkStats`.
+- `write_image`: nid assignment, layout, inode table, superblock, atomic
+  write.  `dir_blocks` serialises directories.
+- `copy_into` / `copy_slow`: reflink-first data copy.
+- `ManifestEntry`: also the session manifest's record type.
+
+### `vm.rs`
+- `boot`: everything needed to start Firecracker (§3.3).  Returns an
+  `Outcome`.
+- `attach`: the host side of the control protocol.  `accept_guest`,
+  `stdin_pump`, `RawTerm`, `on_winch` and `winsize` handle the terminal.
+- `build_seed`, `first_boot_seed`, `state_paths`, `CRED_PATH`,
+  `hash_file`: what crosses into and out of `$HOME`.
+- `guest_env`, `ancestor_dirs`: parts of the `GuestConfig`.
+- `console_tail`: console context for error messages.
+
+### `proxy.rs`
+- `serve` and `handle`: accept vsock-forwarded connections, apply
+  policy, tunnel.
+- `log` and `summarize`: `net.log`.
+
+### `proto.rs`
+- Ports and frame type constants; `GuestConfig`.
+- `write_frame`, `read_frame`, `FrameWriter` (a byte sink → frames).
+- `StreamWriter`, `StreamReader`, `Entry`, `stream_tree`: the file
+  stream.
+
+### `guest.rs`
+- `main` and `run`: the acinit sequence (§3.4–§3.6); `poweroff`.
+- `mount`, `overlay`, `ovl_escape`, `mkdirs`, `mkdirs_owned`,
+  `mkdirs_mirror`: building the root.
+- `vsock_connect`, `start_proxy`, `splice`, `lo_up`: connectivity.
+- `extract_seed`, `export_upper`: streams in and out.
+- `spawn`, `Child`, `write_all_fd`, `set_clock`: running the command.
+
+### `changes.rs`
+- `ChangeSet::load` / `from_stream`, `Change`, `Op`, `St`,
+  `is_sensitive`, `host_matches_manifest`, `same_content`:
+  classification.
+- `summary`, `shown`, `conflicts`, `summary_line`, `short_summary`,
+  `print_list`, `render_diff`, `show_diff`, `colorize`: presentation.
+- `Confined` (`write_file`, `write_bytes`, `symlink`, `mkdir`,
+  `delete`), `openat2_beneath`, `apply`, `Applied`: confined writes.
+- `agent_head`, `import_branch`, `git_file`, `git`: branch import.
+- `extract_state`, `sync_credentials`, `transcripts`, `Transcript`:
+  agent state.
+
+### `util.rs`
+- `Error`, `Result`, `bail!`, `Context`, `last_os_error`: errors.
+- `Fnv`: stable hashing for cache keys.
+- `cache_dir`, `state_dir`, `config_dir`, `runtime_dir`, `home`,
+  `mkdir_private`, `tilde`: paths.
+- `try_lock`, `lock`: `flock`.
+- `glob_match`, `Excludes`, `safe_rel_path`: matching and validation.
+- `human_bytes`, `human_age`, `human_duration`, `parse_mem_mib`,
+  `user_name`, `user_shell`, `group_name`, `prompt_key`, `isatty`,
+  `cstr`, `now`, `random_hex`: small helpers.
+
+## 8. Tests
+
+- `cargo test`: unit tests (currently the kernel version ordering in
+  `images.rs`).
+- `make test` (or `tests/run.sh [words...]`): end-to-end scripts that
+  boot real VMs, so they need `/dev/kvm`.  Each `tests/tNN-*.sh` is
+  standalone and uses `tests/lib.sh` (logging, assertions, an isolated
+  session store).  `tests/pty.py` drives the interactive review on a
+  pseudo-terminal.  The scripts cover:
+
+  | Script | Area |
+  |---|---|
+  | `t00-cli.sh` | usage and errors, no VM needed |
+  | `t01-boot.sh` | guest environment, identity, paths, isolation |
+  | `t02-timing.sh` | startup and teardown time |
+  | `t03-changes.sh` | change capture, summary, listing, diff |
+  | `t04-apply.sh` | apply, idempotence, conflicts, what is never applied |
+  | `t05-review-menu.sh` | the interactive review |
+  | `t06-resume.sh` | resume/shell persistence, agent state export |
+  | `t07-network.sh` | proxy policy, `--no-net`, logging |
+  | `t08-branch.sh` | branch import |
+  | `t09-sessions.sh` | listing, lookup, show, removal |
+
+  `AGENTCRACKER=/path/to/agentcracker make test` tests an installed copy.
+  A failing test's work directory and sessions are kept under
+  `build/tests/`.
+
+## 9. Debugging and development aids
+
+- `--console`: show the guest kernel console and acinit messages live;
+  the kernel is booted without `quiet`.
+- `<session>/console.log`: the console and Firecracker's log from every
+  boot.  Its last lines are appended to boot errors.
+  `AGENTCRACKER_FC_LOG=Info` (or `Debug`) raises Firecracker's log level
+  (default `Error`).
+- `<session>/net.log`: every proxy decision.  `agentcracker show`
+  summarises it.
+- `agentcracker shell [SESSION]`: a shell inside a session's VM, on the
+  same disk.
+- `AGENTCRACKER_LIB=<dir>`: use the assets in `<dir>` (e.g. a different
+  `vmlinux`).
+- `agentcracker refresh`: rebuild the `/usr` snapshot now.
+  `~/.cache/agentcracker/refresh.log` has the output of background
+  rebuilds.
+- `agentcracker __mkimage <dir> <out.img>`: write `<dir>` as an EROFS
+  image and print walk/write timings.  You can check the result with
+  `fsck.erofs` or a loop mount.
+- `agentcracker __seccomp-json <in.json> <out.json>`: the seccomp policy
+  adaptation used by the Makefile.
+
+## 10. Making changes
+
+- **Image contents or layout**: bump `images::FORMAT` so that cached
+  images built under the old rules are not reused.
+- **A new control frame**: add an `M_*` constant in `proto.rs`, then
+  handle it in both `vm::attach` and `guest::run`.  Host and guest are
+  the same binary, so they are always upgraded together, but a running
+  session's `acinit` is the copy in its base image.  A rebuilt base image
+  (its key includes acinit's mtime) is used on the next boot.
+- **A new `GuestConfig` field**: give it a default (the struct is
+  `Default`) and fill it in `vm::boot`.
+- **A new config key**: add it to `config::File` and `Config`, and merge
+  it in `Config::merge` (scalars override, lists append).  Mention it in
+  `cli::USAGE` and the README.
+- **New data out of the guest**: go through a file stream and
+  `Confined`.  Never mount, loop-mount or parse guest-written disk images
+  on the host.
+- **Docs**: keep the module comment and the function comments in step
+  with behaviour, and keep this file's source guide in step with the
+  files.
