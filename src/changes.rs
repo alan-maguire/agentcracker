@@ -31,8 +31,8 @@
 //! it ([`apply`], [`Confined`]).
 //!
 //! Agent state.  [`extract_state`] unpacks the exported agent state (just as
-//! carefully), [`sync_credentials`] carries refreshed OAuth tokens back to
-//! the host, and [`transcripts`] summarises Claude Code transcripts for
+//! carefully), [`guest_refreshed_credentials`] notices refreshed OAuth
+//! tokens (never copied back to the host), and [`transcripts`] summarises Claude Code transcripts for
 //! `agentcracker show`.
 
 use std::collections::{HashMap, HashSet};
@@ -467,10 +467,10 @@ pub fn print_list(cs: &ChangeSet, limit: usize) {
             St::Deleted => ("D", r),
             St::Container => (" ", ""),
         };
-        let mut p = c.path().display().to_string();
+        let mut p = crate::util::safe_path(c.path());
         match &c.op {
             Op::Dir { .. } => p.push('/'),
-            Op::Symlink { target } => p.push_str(&format!(" -> {}", String::from_utf8_lossy(target))),
+            Op::Symlink { target } => p.push_str(&format!(" -> {}", crate::util::safe_text(target, false))),
             Op::Delete if c.nested > 0 => p.push_str(&format!("/ ({} entries)", c.nested)),
             _ => {}
         }
@@ -633,7 +633,9 @@ pub fn show_diff(cs: &ChangeSet, tmpdir: &Path) -> Result<()> {
         d.extend_from_slice(format!("\n# plus {} changes inside .git/ (never applied; see `agentcracker branch`)\n", cs.git.len()).as_bytes());
     }
     if crate::util::isatty(1) {
-        let d = colorize(&d);
+        // file names and contents are the agent's: never let them drive the
+        // terminal (raw bytes are kept for `diff > file`)
+        let d = colorize(crate::util::safe_text(&d, true).as_bytes());
         let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".into());
         let mut parts = pager.split_whitespace();
         let prog = parts.next().unwrap_or("less");
@@ -846,30 +848,6 @@ impl Confined {
         res
     }
 
-    /// Write `data` to a file at `rel` with permission bits `mode & 0o777`,
-    /// through a temporary file renamed into place.  Unlike
-    /// [`Confined::write_file`], it does not remove a directory at the target.
-    /// Returns an I/O error on failure.
-    pub fn write_bytes(&mut self, rel: &Path, mode: u32, data: &[u8]) -> io::Result<()> {
-        let pfd = self.parent(rel)?;
-        let name = Self::name_of(rel)?;
-        let tmp = self.tmpname();
-        let fd = unsafe {
-            libc::openat(pfd.as_raw_fd(), tmp.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, mode & 0o777)
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut out = unsafe { File::from_raw_fd(fd) };
-        out.write_all(data)?;
-        if unsafe { libc::renameat(pfd.as_raw_fd(), tmp.as_ptr(), pfd.as_raw_fd(), name.as_ptr()) } != 0 {
-            let e = io::Error::last_os_error();
-            unsafe { libc::unlinkat(pfd.as_raw_fd(), tmp.as_ptr(), 0) };
-            return Err(e);
-        }
-        Ok(())
-    }
-
     /// Create a symlink at `rel` pointing at `target`, replacing whatever is
     /// there (a directory is removed first).  The target is stored as it is and
     /// never followed here.  Returns an error if `target` contains a NUL byte
@@ -977,12 +955,12 @@ pub fn apply(cs: &ChangeSet, tag: &str, include_conflicts: bool) -> Result<Appli
         }
         match w.delete(c.path()) {
             Ok(()) => res.deleted += 1,
-            Err(e) => res.errors.push(format!("{}: {e}", c.path().display())),
+            Err(e) => res.errors.push(format!("{}: {e}", crate::util::safe_path(c.path()))),
         }
     }
     for c in cs.changes.iter().filter(|c| c.st != St::Deleted) {
         if safe_rel_path(&c.raw).is_none() {
-            res.errors.push(format!("{}: unsafe path", c.path().display()));
+            res.errors.push(format!("{}: unsafe path", crate::util::safe_path(c.path())));
             continue;
         }
         if c.in_place {
@@ -1001,7 +979,7 @@ pub fn apply(cs: &ChangeSet, tag: &str, include_conflicts: bool) -> Result<Appli
         };
         match r {
             Ok(n) => res.written += n,
-            Err(e) => res.errors.push(format!("{}: {e}", c.path().display())),
+            Err(e) => res.errors.push(format!("{}: {e}", crate::util::safe_path(c.path()))),
         }
     }
     res.in_place = in_place;
@@ -1151,6 +1129,7 @@ pub fn import_branch(cs: &ChangeSet, s: &Session) -> Result<(String, String)> {
         Some(base) => git(&["rev-list", "--count", &format!("{base}..{sha}")], &cs.cwd).unwrap_or_default(),
         None => String::new(),
     };
+    let from = crate::util::safe_text(from.as_bytes(), false);
     let desc = if count.is_empty() { format!("from {from}") } else { format!("{count} commit(s) on {from}") };
     Ok((branch, desc))
 }
@@ -1189,41 +1168,24 @@ pub fn extract_state(s: &Session) -> Result<()> {
     Ok(())
 }
 
-/// If the guest refreshed the Claude OAuth token and the host copy has not
-/// changed since it was seeded, write the refreshed token back (refresh
-/// tokens rotate, so the host copy would otherwise stop working).
+/// Did the guest change the Claude credentials it was seeded with (i.e.
+/// refresh the OAuth token)?
 ///
-/// It writes only if all of these hold: the exported credentials differ
-/// from what was seeded (`meta.cred_seed`); the host file still has the
-/// seeded hash, so the host did not refresh it meanwhile; and the new file
-/// is a JSON object with a `claudeAiOauth` key.  The write is confined to
-/// the credentials file's directory, atomic and mode 0600, and `cred_seed`
-/// is updated so the next boot compares against the new file.
+/// The guest's copy is never written back to the host: the host cannot
+/// tell a refreshed token for the user's account from a token for some
+/// other account that a compromised guest planted, and adopting the latter
+/// would silently send the user's later host sessions to that account.  So
+/// this only reports the refresh, and deletes the exported copy so that no
+/// guest-written credentials are kept on the host either.
 ///
-/// `s`: the session (the caller saves it).  Returns `Ok(true)` if the host
-/// file was updated, `Ok(false)` if that was unnecessary or not safe, and
-/// an error if the write failed.
-pub fn sync_credentials(s: &mut Session) -> Result<bool> {
+/// `s`: the session.  Returns true if the guest's credentials differ from
+/// the seeded ones.
+pub fn guest_refreshed_credentials(s: &Session) -> bool {
     let guest = s.path("state").join(crate::vm::CRED_PATH);
-    let Ok(data) = std::fs::read(&guest) else { return Ok(false) };
+    let Ok(data) = std::fs::read(&guest) else { return false };
+    let _ = std::fs::remove_file(&guest);
     let gh = crate::util::Fnv::new().bytes(&data).hex();
-    let host = crate::util::home().join(crate::vm::CRED_PATH);
-    let Some(seed) = s.meta.cred_seed.clone() else { return Ok(false) };
-    if gh == seed || crate::vm::hash_file(&host).as_deref() != Some(seed.as_str()) {
-        return Ok(false);
-    }
-    let v: serde_json::Value = match serde_json::from_slice(&data) {
-        Ok(v) => v,
-        Err(_) => return Ok(false),
-    };
-    if !v.is_object() || v.get("claudeAiOauth").is_none() {
-        return Ok(false);
-    }
-    let parent = host.parent().unwrap();
-    let mut w = Confined::new(parent, &s.meta.id)?;
-    w.write_bytes(Path::new(host.file_name().unwrap()), 0o600, &data)?;
-    s.meta.cred_seed = Some(gh);
-    Ok(true)
+    s.meta.cred_seed.as_deref().is_some_and(|seed| seed != gh)
 }
 
 /// Summary of one Claude Code transcript (`.jsonl`) captured from the guest.

@@ -67,6 +67,8 @@ pub fn serve(listener: UnixListener, p: Arc<Proxy>) {
 /// `FAIL(connect)`; `target`: `host:port` as requested.  Errors are
 /// ignored: logging must never break a connection.
 fn log(p: &Proxy, verdict: &str, target: &str) {
+    // the target is the guest's text; net.log is shown by `agentcracker show`
+    let target = &crate::util::safe_text(target.as_bytes(), false).replace(' ', "\\x20");
     if let Ok(mut g) = p.log.lock() {
         if let Some(f) = g.as_mut() {
             let _ = writeln!(f, "{} {verdict} {target}", crate::util::now());
@@ -116,6 +118,11 @@ fn handle(c: UnixStream, p: &Proxy) -> io::Result<()> {
         Some((h, pt)) => (h.trim_matches(|c| c == '[' || c == ']').to_string(), pt.parse::<u16>().unwrap_or(0)),
         None => (target.clone(), 443),
     };
+    if !valid_host(&host) || port == 0 {
+        log(p, "DENY(bad target)", &target);
+        w.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+        return Ok(());
+    }
     let port_ok = port == 443 || host_allowed(&p.allow, &format!("{host}:{port}"));
     if !p.enabled || !port_ok || !(host_allowed(&p.allow, &host) || host_allowed(&p.allow, &format!("{host}:{port}"))) {
         log(p, "DENY", &target);
@@ -162,6 +169,15 @@ fn handle(c: UnixStream, p: &Proxy) -> io::Result<()> {
     let _ = up_w.shutdown(Shutdown::Write);
     let _ = t.join();
     Ok(())
+}
+
+/// A host name (letters, digits, `-`, `.`, `_`) or an IP literal: anything
+/// else in a CONNECT target is refused before it is matched or resolved.
+fn valid_host(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 253
+        && (h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_')
+            || h.parse::<std::net::Ipv6Addr>().is_ok())
 }
 
 /// Summarise a session's `net.log` for `agentcracker show`.

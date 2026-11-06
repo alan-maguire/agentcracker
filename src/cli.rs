@@ -348,10 +348,11 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
     if let Err(e) = changes::extract_state(s) {
         eprintln!("agentcracker: could not save agent state: {e}");
     }
-    match changes::sync_credentials(s) {
-        Ok(true) => status("synced refreshed Claude credentials back to the host"),
-        Ok(false) => {}
-        Err(e) => eprintln!("agentcracker: credential sync: {e}"),
+    if changes::guest_refreshed_credentials(s) {
+        status(
+            "Claude refreshed its login inside the VM; agentcracker never copies credentials back to the host. \
+             If Claude on the host later says you are logged out, run /login there.",
+        );
     }
     s.save()?;
     crate::util::mark("post-processing");
@@ -391,7 +392,7 @@ fn review(s: &mut Session, cfg: &Config) -> Result<()> {
                 eprintln!("No changes to {}.", tilde(&s.meta.cwd));
             }
             if let Some((sha, name)) = &head {
-                eprintln!("The agent committed: {name} is now {}", &sha[..12]);
+                eprintln!("The agent committed: {} is now {}", crate::util::safe_text(name.as_bytes(), false), crate::util::safe_text(sha.get(..12).unwrap_or(sha).as_bytes(), false));
             }
         } else {
             eprintln!("No change record (the session did not shut down cleanly).");
@@ -484,7 +485,7 @@ fn apply_interactive(s: &mut Session, cs: &ChangeSet) -> Result<bool> {
     if !conflicts.is_empty() {
         eprintln!("These files changed on the host since the session started:");
         for c in &conflicts {
-            eprintln!("  {}", c.path().display());
+            eprintln!("  {}", crate::util::safe_path(c.path()));
         }
         if !isatty(0) {
             crate::bail!("refusing to apply with conflicts (run interactively to choose)");
@@ -611,10 +612,9 @@ fn cmd_ls() -> Result<i32> {
             let tail: String = dir.chars().rev().take(33).collect::<Vec<_>>().into_iter().rev().collect();
             dir = format!("…{tail}");
         }
-        let mut cmd = s.meta.cmd.join(" ");
-        if cmd.len() > 40 {
-            cmd.truncate(39);
-            cmd.push('…');
+        let mut cmd = crate::util::safe_text(s.meta.cmd.join(" ").as_bytes(), false);
+        if cmd.chars().count() > 40 {
+            cmd = cmd.chars().take(39).collect::<String>() + "…";
         }
         println!("{:<9} {:>4}  {:<8} {:<12} {:<34} {}", s.meta.id, human_age(t.saturating_sub(s.meta.created)), status_of(s), ch, dir, cmd);
     }
@@ -636,7 +636,7 @@ fn cmd_show(arg: Option<&str>) -> Result<i32> {
     let row = |k: &str, v: String| println!("{k:<10} {v}");
     row("session", m.id.clone());
     row("directory", tilde(&m.cwd));
-    row("command", m.cmd.join(" "));
+    row("command", crate::util::safe_text(m.cmd.join(" ").as_bytes(), false));
     row("created", format!("{} ({} ago)", fmt_time(m.created), human_age(t.saturating_sub(m.created))));
     let mut st = status_of(&s);
     if let Some(c) = m.exit_code {
@@ -646,7 +646,7 @@ fn cmd_show(arg: Option<&str>) -> Result<i32> {
     }
     row("status", format!("{st} · {} boot(s) · ran {}", m.boots, human_duration(m.runtime)));
     if let Some(e) = &m.error {
-        row("error", e.lines().next().unwrap_or("").to_string());
+        row("error", crate::util::safe_text(e.lines().next().unwrap_or("").as_bytes(), false));
     }
     row(
         "vm",
@@ -674,6 +674,7 @@ fn cmd_show(arg: Option<&str>) -> Result<i32> {
     if !net.is_empty() {
         let mut first = true;
         for (host, a, d) in &net {
+            let host = &crate::util::safe_text(host.as_bytes(), false);
             let v = match (a, d) {
                 (a, 0) => format!("{a} allowed"),
                 (0, d) => format!("{d} denied (rerun with --allow {host})"),
@@ -686,13 +687,15 @@ fn cmd_show(arg: Option<&str>) -> Result<i32> {
     let tr = changes::transcripts(&s);
     if !tr.is_empty() {
         row("agent", format!("{} Claude transcript(s) (resume inside with: agentcracker resume {} claude --resume)", tr.len(), m.id));
+        // transcripts are written by the guest: sanitise, and cut by chars
+        let clip = |t: &str, n: usize| -> String {
+            let t = crate::util::safe_text(t.as_bytes(), false);
+            if t.chars().count() > n { t.chars().take(n - 1).collect::<String>() + "…" } else { t }
+        };
         for x in tr {
-            let mut p = x.first_prompt.clone();
-            if p.chars().count() > 60 {
-                p = p.chars().take(59).collect::<String>() + "…";
-            }
-            let last = x.last.get(..16).unwrap_or(&x.last).replace('T', " ");
-            row("", format!("{} {:>4} msgs  last {}  \"{}\"", &x.id[..x.id.len().min(8)], x.messages, last, p));
+            let id: String = clip(&x.id, 64).chars().take(8).collect();
+            let last = clip(&x.last, 64).chars().take(16).collect::<String>().replace('T', " ");
+            row("", format!("{id} {:>4} msgs  last {last}  \"{}\"", x.messages, clip(&x.first_prompt, 60)));
         }
         row("", format!("transcripts: {}", tilde(&s.path("state/.claude/projects"))));
     }

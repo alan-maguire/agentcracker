@@ -201,9 +201,9 @@ copies bytes without reading them.  Every decision goes to `net.log`.
 
 ### 3.6 Shutdown and export (`guest::run`, after the command exits)
 
-1. Remaining output gets 0.5 s to drain; every other process gets SIGTERM,
-   then SIGKILL 0.2 s later; output gets another 0.5 s; then filesystems
-   are synced.
+1. Remaining output gets up to 0.5 s to drain; every other process gets
+   SIGTERM, then SIGKILL once none are left or 0.2 s have passed; output
+   gets up to another 0.5 s; then filesystems are synced.
 2. EXIT is sent with the exit status (128 + signal if the command was
    killed by a signal).
 3. `export_upper` walks `/scratch/proj/upper` and streams it as EXPORT
@@ -228,9 +228,11 @@ it), removes the runtime directory and returns an `Outcome`.
 
 - `ChangeSet::load` + `summary` record change counts in `meta.json`;
 - `changes::extract_state` unpacks `state.stream` into `state/`;
-- `changes::sync_credentials` writes a token the guest refreshed back to
-  `~/.claude/.credentials.json`, but only if the host copy is still the
-  one that was seeded.
+- `changes::guest_refreshed_credentials` reports whether the guest
+  refreshed its Claude login, and deletes the exported copy.  Guest
+  credentials are never written to the host: the host cannot tell a
+  refreshed token for the user's account from one for an account a
+  compromised guest planted.
 
 ### 3.8 Review, apply and branch (`cli::review`, `changes.rs`)
 
@@ -368,7 +370,8 @@ reaches the host, and how each one is handled:
 | `changes.stream` | Parsed with path validation; data read by offset; applied only on request, through `Confined` (`openat2` beneath the project, no symlinks, temporary file + rename, `mode & 0777`); `.git/` never written; conflicts skipped unless the user chooses to overwrite. |
 | Git objects | Only object files with validated names; imported via `git fetch` with `fsckObjects`; no guest hooks, config or refs used. |
 | `state.stream` | Unpacked with `Confined` into the session's `state/`; symlinks and deletions ignored. |
-| Credentials | Written back only if the host copy still matches what was seeded and the new file looks like Claude Code credentials. |
+| Credentials | Never written back to the host or kept in the session; a refresh in the guest is only reported. |
+| Terminal output | Every guest-derived string agentcracker prints (paths, symlink targets, diffs on a terminal, branch names, host names, transcript text, guest errors, console tails) goes through `util::safe_text`, which shows control, C1 and bidi-override characters as escapes; the terminal is soft-reset after an interactive session; the proxy refuses CONNECT targets that are not host names or IP literals. |
 | Network | No NIC; HTTPS `CONNECT` only, to allowlisted hosts (port 443 unless `host:port` is listed); DNS resolved on the host; decisions logged. |
 | Firecracker | Runs as the user, with the compiled seccomp filter.  **No jailer**: it needs root, which conflicts with the rootless goal, so there is no chroot or cgroup limit around the VMM. |
 
@@ -485,7 +488,7 @@ errors into `agentcracker: <msg>` and exit status 1.
 - `Confined` (`write_file`, `write_bytes`, `symlink`, `mkdir`,
   `delete`), `openat2_beneath`, `apply`, `Applied`: confined writes.
 - `agent_head`, `import_branch`, `git_file`, `git`: branch import.
-- `extract_state`, `sync_credentials`, `transcripts`, `Transcript`:
+- `extract_state`, `guest_refreshed_credentials`, `transcripts`, `Transcript`:
   agent state.
 
 ### `util.rs`

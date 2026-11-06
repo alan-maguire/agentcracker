@@ -568,3 +568,36 @@ pub fn mark(what: &str) {
         eprintln!("\x1b[2m[{:7.3}s] {what}\x1b[0m", t.elapsed().as_secs_f64());
     }
 }
+
+/// Make text that came from the guest safe to show on a terminal.
+///
+/// Everything the agent controls - file names, symlink targets, file
+/// contents in a diff, branch names, host names, transcript text, error
+/// messages - can carry terminal control sequences that would move the
+/// cursor, rewrite lines (hiding parts of a diff under review), change the
+/// window title or write the clipboard.  This shows every C0 control
+/// (except tab, and newline when `multiline`), DEL, every C1 control and the
+/// bidirectional-override characters (which can reorder what is displayed)
+/// as visible escapes such as `\x1b` or `\u{202e}`; invalid UTF-8 becomes
+/// U+FFFD.
+pub fn safe_text(b: &[u8], multiline: bool) -> String {
+    let s = String::from_utf8_lossy(b);
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let bidi = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}');
+        match c {
+            '\t' => out.push(c),
+            '\n' if multiline => out.push(c),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c if ('\u{80}'..='\u{9f}').contains(&c) || bidi => out.push_str(&format!("\\u{{{:04x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// [`safe_text`] for a path, on one line.
+pub fn safe_path(p: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    safe_text(p.as_os_str().as_bytes(), false)
+}

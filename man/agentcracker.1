@@ -496,6 +496,13 @@ network beyond the allowlist, and a compromise of the guest kernel
 stays inside the VM.  Firecracker itself runs as the invoking user under
 a seccomp filter, without its jailer (which needs root).
 .PP
+Nothing flows from the guest to the host except the change record, the
+agent's transcripts and the network log.  Credentials are never copied
+back (a token refreshed inside the VM is reported, not adopted), and
+everything taken from the guest is printed with control and
+bidirectional-override characters escaped, so a file name or diff cannot
+rewrite the terminal while it is being reviewed.
+.PP
 What the agent writes is untrusted until reviewed: read the diff before
 applying, especially entries flagged as running or configuring tools on
 the host, and treat a branch imported with

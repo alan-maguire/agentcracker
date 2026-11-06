@@ -29,6 +29,7 @@ TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$TESTS_DIR")
 AC=${AGENTCRACKER:-$REPO/target/release/agentcracker}
 TEST_NAME=$(basename "$0" .sh)
+REAL_HOME=$HOME
 
 _PASS=0
 _FAIL=0

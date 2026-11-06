@@ -493,6 +493,10 @@ host's credential store should be reachable.
 - Optionally, transcripts and agent state written in the guest are
   synced back to the host on exit (`--sync-agent-state`), so session
   history survives.
+- Credentials never flow back: a token the guest refreshed is not copied
+  to the host, because the host cannot tell it from a token for some
+  other account that a compromised guest planted (which would quietly
+  send the user's later host sessions to that account).
 - Accept the limit honestly: the token is inside the VM, so a
   misbehaving agent could exfiltrate it to an allowlisted endpoint.
   Use scoped / short-lived tokens where the provider supports them.
@@ -913,13 +917,18 @@ this project's transcripts (so `claude --continue` works) and a
 `~/.claude.json` filtered to this project.  `.credentials.json` is
 refreshed on every boot.  On every exit, `~/.claude/projects` is exported
 to `<session>/state/`, where `agentcracker show` summarises it.  If the
-guest refreshed the OAuth token and the host's copy hasn't changed since
-boot, the new token is written back (refresh tokens rotate).  Extra paths
+guest refreshes the OAuth token, agentcracker says so but never copies it
+to the host (see [Credentials](#credentials)); if refresh-token rotation
+then logs out Claude on the host, `/login` there fixes it.  Extra paths
 come from `home = [...]` and `state = [...]` in the config.
 
 **Apply.**  Implemented as described: confined `openat2` writes, temp file
 plus rename, setuid/setgid dropped, `.git/` internals never written,
-sensitive files flagged.  Conflicts are detected by comparing the host's
+sensitive files flagged.  Nothing the guest controls reaches the terminal
+raw: file names, symlink targets, diff content (on a terminal), branch and
+host names and transcript text are printed with control and
+bidi-override characters escaped, so a diff under review cannot hide
+lines or write the clipboard.  Conflicts are detected by comparing the host's
 current size, mtime, inode and mode with the manifest; a change the host
 already has (applied before, or the same edit made by hand) is not a
 conflict and is skipped, so applying twice is harmless.  `branch` writes only

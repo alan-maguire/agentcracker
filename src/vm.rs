@@ -85,8 +85,9 @@ fn first_boot_seed(cwd: &Path, cfg: &Config) -> Vec<String> {
 }
 
 /// Paths below `$HOME` exported from the guest to the session store on exit:
-/// Claude Code's project transcripts, its credentials file (to pick up
-/// refreshed tokens), and the configured `state` entries.
+/// Claude Code's project transcripts, its credentials file (only to notice
+/// a refresh; see [`crate::changes::guest_refreshed_credentials`]), and the
+/// configured `state` entries.
 ///
 /// `cfg`: supplies `state`.  Returns paths relative to `$HOME`.
 pub fn state_paths(cfg: &Config) -> Vec<String> {
@@ -255,6 +256,16 @@ impl RawTerm {
         }
     }
 }
+/// Undo terminal state the guest may have left behind before agentcracker
+/// prints anything of its own (the review in particular): leave the
+/// alternate screen, soft-reset (attributes, scroll region, origin and
+/// insert modes, cursor visibility), select the ASCII character set and
+/// turn off mouse reporting, bracketed paste and application cursor keys.
+fn reset_terminal() {
+    let _ = std::io::stdout().write_all(b"\x1b[?1049l\x1b[!p\x1b(B\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1l\r");
+    let _ = std::io::stdout().flush();
+}
+
 impl Drop for RawTerm {
     /// Restore the terminal settings saved by [`RawTerm::enter`].
     fn drop(&mut self) {
@@ -371,7 +382,8 @@ fn accept_guest(l: &UnixListener, fc: &mut Child, deadline: Duration) -> Result<
 /// console and Firecracker's own log), or an empty string if there is none.
 /// Appended to error messages.
 pub fn console_tail(s: &Session, n: usize) -> String {
-    let text = std::fs::read_to_string(s.path("console.log")).unwrap_or_default();
+    // the console carries guest output: never let it drive the terminal
+    let text = crate::util::safe_text(&std::fs::read(s.path("console.log")).unwrap_or_default(), true);
     let lines: Vec<&str> = text.lines().collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
@@ -517,6 +529,9 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
 
     crate::util::mark("firecracker spawned");
     let res = attach(s, &ctrl_l, &mut fc, &gcfg, &seed, tty);
+    if tty {
+        reset_terminal();
+    }
 
     // the guest powers off after DONE; give firecracker a moment, then make sure
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -616,7 +631,7 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
             }
             M_READY => crate::util::mark("guest command started"),
             M_ERROR => {
-                err = Some(format!("guest setup failed: {}", String::from_utf8_lossy(&d)));
+                err = Some(format!("guest setup failed: {}", crate::util::safe_text(&d, true)));
                 break;
             }
             M_EXIT => {
