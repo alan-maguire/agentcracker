@@ -189,10 +189,20 @@ On the host, `vm::attach` puts the terminal in raw mode.  A thread
 by a SIGWINCH self-pipe, as RESIZE frames.  The main loop writes STDOUT
 and STDERR frames to the terminal.
 
-In the guest, one thread per output stream sends STDOUT/STDERR frames.
-Another applies STDIN, STDIN_EOF and RESIZE frames, and sends SIGHUP to
-the command's process group if the host goes away.  The main thread
-reaps every process (as PID 1 must) until the command exits.
+In the guest, one thread per output stream sends STDOUT/STDERR frames
+(`stream_output`).  Another (`pump_input`) applies STDIN, STDIN_EOF,
+RESIZE and STOP frames, and sends SIGHUP to the command's process group
+if the host goes away.  STOP is how `agentcracker stop` works: it sends
+SIGTERM to the session's host process (pid in `meta.json`), whose
+SIGTERM handler has `stdin_pump` send STOP; the guest gives the command
+SIGTERM, then SIGKILL 5 s later, and shutdown proceeds as usual.  The
+main thread reaps every process (as PID 1 must) until the command exits.
+
+`--detach` (`cli::run_detached`) takes the session lock, forks, and lets
+the child (new session, stdin `/dev/null`, stdout/stderr to the
+session's `stdout`/`stderr` files) run `boot_and_review` with that lock;
+there is no terminal, so there is no review.  `wait` takes each
+session's lock (blocking) to learn that its VM has gone.
 
 All network traffic goes through the proxy.  `proxy::handle` reads
 `CONNECT host:port`, checks it with `config::host_allowed` (port 443
@@ -287,13 +297,16 @@ $PREFIX/lib/agentcracker/{acinit,firecracker,vmlinux,seccomp.bpf}
   base/base-<key>.img                base root; key: user, acinit mtime, /etc, symlinks
   usr/usr-<key>.img                  /usr; key: package DBs + directory mtimes
   tools/tools-<key>.img              toolchains; key: roots + directory mtimes
-  lower/<key>.img                    project snapshots; key: manifest hash
+  lower/<dir>-<key>.img              full project snapshots; key: directory + manifest hash
+  lower/<dir>-<key>.delta-<base>.img delta over the base snapshot <base>
+  lower/<dir>-<key>.manifest         the manifest of <key> (binary)
   {base,usr,tools}/lock              serialises builders
   refresh.log                        output of background /usr rebuilds
 
 ~/.local/state/agentcracker/sessions/<id>/   ($XDG_STATE_HOME)
-  meta.json  manifest.json  lower.img  scratch.img  changes.stream
-  state.stream  state/  console.log  net.log  lock  tmp/
+  meta.json  manifest.bin  lower.img  [lower-delta.img]  scratch.img
+  changes.stream  state.stream  state/  console.log  net.log  lock  tmp/
+  [stdout  stderr]                    output of --detach'ed runs
 
 $XDG_RUNTIME_DIR/agentcracker/<id>/  (or /tmp/agentcracker-<uid>/<id>/)
   firecracker.json  v.sock  v.sock_1024  v.sock_1025     (only while booted)
@@ -318,6 +331,7 @@ A frame is `type: u8`, `len: u32` big-endian, then `len` bytes (at most
 | 4 | STDIN | host → guest | terminal input |
 | 5 | RESIZE | host → guest | rows `u16`, cols `u16` |
 | 6 | STDIN_EOF | host → guest | — |
+| 7 | STOP | host → guest | — (SIGTERM the command, SIGKILL after 5 s) |
 | 10 | READY | guest → host | — |
 | 11 | ERROR | guest → host | UTF-8 message; the guest powers off |
 | 12 | STDOUT | guest → host | command output |
@@ -525,6 +539,8 @@ errors into `agentcracker: <msg>` and exit status 1.
   | `t07-network.sh` | proxy policy, `--no-net`, logging |
   | `t08-branch.sh` | branch import |
   | `t09-sessions.sh` | listing, lookup, show, removal |
+  | `t10-hostile-guest.sh` | credentials, terminal escapes, secrets in snapshots |
+  | `t11-orchestration.sh` | `--detach`, `wait`, `stop`, `--json` |
 
   `AGENTCRACKER=/path/to/agentcracker make test` tests an installed copy.
   A failing test's work directory and sessions are kept under

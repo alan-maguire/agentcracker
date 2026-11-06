@@ -591,6 +591,93 @@ fn spawn(cfg: &GuestConfig) -> Result<Child> {
 ///
 /// Returns `Ok(())` once DONE has been sent; an error for any failed setup
 /// step or protocol violation.
+/// Send everything read from `fd` to the host as frames of type `kind`
+/// (in a new thread), then signal `done`.
+fn stream_output(fd: RawFd, kind: u8, wr: Arc<Mutex<UnixStream>>, done: mpsc::Sender<()>) {
+    std::thread::spawn(move || {
+        let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut buf = vec![0u8; 32768];
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if write_frame(&mut *wr.lock().unwrap(), kind, &buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        std::mem::forget(f); // fd closed at poweroff
+        let _ = done.send(());
+    });
+}
+
+/// Feed frames from the host to a command: input, end of input, terminal
+/// size, and STOP (SIGTERM to its process group, SIGKILL 5 s later).  When
+/// the host goes away the command's process group gets SIGHUP.
+///
+/// `input`: the command's stdin (the pty master when `tty`); `cpid`: the
+/// command, which leads its own process group.
+fn pump_input(mut rd: UnixStream, input: RawFd, tty: bool, cpid: libc::pid_t) {
+    let mut last = b'\n';
+    let mut input_closed = false;
+    let mut stopping = false;
+    loop {
+        let Ok((t, d)) = read_frame(&mut rd) else {
+            // host went away: end the command
+            unsafe { libc::kill(-cpid, libc::SIGHUP) };
+            break;
+        };
+        match t {
+            M_STDIN if !input_closed => {
+                if let Some(&l) = d.last() {
+                    last = l;
+                }
+                let _ = write_all_fd(input, &d);
+            }
+            M_STDIN_EOF if tty => {
+                let eof: &[u8] = if last == b'\n' { b"\x04" } else { b"\x04\x04" };
+                let _ = write_all_fd(input, eof);
+            }
+            M_STDIN_EOF if !input_closed => {
+                unsafe { libc::close(input) };
+                input_closed = true;
+            }
+            M_RESIZE if d.len() == 4 => {
+                let ws = libc::winsize {
+                    ws_row: u16::from_be_bytes([d[0], d[1]]),
+                    ws_col: u16::from_be_bytes([d[2], d[3]]),
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                if tty {
+                    unsafe { libc::ioctl(input, libc::TIOCSWINSZ, &ws) };
+                }
+            }
+            M_STOP if !stopping => {
+                stopping = true;
+                unsafe { libc::kill(-cpid, libc::SIGTERM) };
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(5));
+                    unsafe { libc::kill(-cpid, libc::SIGKILL) };
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Exit code for a wait status: the exit status, or 128 + signal.
+fn exit_code(status: i32) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        1
+    }
+}
+
 fn run() -> Result<()> {
     let _ = std::fs::create_dir_all("/dev");
     let _ = mount("proc", "/proc", "proc", 0, "");
@@ -703,24 +790,7 @@ fn run() -> Result<()> {
     }
     let n_streams = streams.len();
     for (fd, kind) in streams {
-        let wr2 = wr.clone();
-        let done_tx = done_tx.clone();
-        std::thread::spawn(move || {
-            let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
-            let mut buf = vec![0u8; 32768];
-            loop {
-                match f.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if write_frame(&mut *wr2.lock().unwrap(), kind, &buf[..n]).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            std::mem::forget(f); // fd closed at poweroff
-            let _ = done_tx.send(());
-        });
+        stream_output(fd, kind, wr.clone(), done_tx.clone());
     }
     drop(done_tx);
     // wait (up to `t` in total) for every output stream to reach EOF
@@ -737,48 +807,8 @@ fn run() -> Result<()> {
     };
 
     // host -> command input
-    let cpid = child.pid;
-    let input = child.input;
-    let tty = cfg.tty;
-    std::thread::spawn(move || {
-        let mut last = b'\n';
-        let mut input_closed = false;
-        loop {
-            let Ok((t, d)) = read_frame(&mut rd) else {
-                // host went away: end the session
-                unsafe { libc::kill(-cpid, libc::SIGHUP) };
-                break;
-            };
-            match t {
-                M_STDIN if !input_closed => {
-                    if let Some(&l) = d.last() {
-                        last = l;
-                    }
-                    let _ = write_all_fd(input, &d);
-                }
-                M_STDIN_EOF if tty => {
-                    let eof: &[u8] = if last == b'\n' { b"\x04" } else { b"\x04\x04" };
-                    let _ = write_all_fd(input, eof);
-                }
-                M_STDIN_EOF if !input_closed => {
-                    unsafe { libc::close(input) };
-                    input_closed = true;
-                }
-                M_RESIZE if d.len() == 4 => {
-                    let ws = libc::winsize {
-                        ws_row: u16::from_be_bytes([d[0], d[1]]),
-                        ws_col: u16::from_be_bytes([d[2], d[3]]),
-                        ws_xpixel: 0,
-                        ws_ypixel: 0,
-                    };
-                    if tty {
-                        unsafe { libc::ioctl(input, libc::TIOCSWINSZ, &ws) };
-                    }
-                }
-                _ => {}
-            }
-        }
-    });
+    let (cpid, input, tty) = (child.pid, child.input, cfg.tty);
+    std::thread::spawn(move || pump_input(rd, input, tty, cpid));
 
     // reap everything; stop when the command itself exits
     let mut status = 0;
@@ -791,13 +821,7 @@ fn run() -> Result<()> {
             break;
         }
     }
-    let code = if libc::WIFEXITED(status) {
-        libc::WEXITSTATUS(status)
-    } else if libc::WIFSIGNALED(status) {
-        128 + libc::WTERMSIG(status)
-    } else {
-        1
-    };
+    let code = exit_code(status);
     // let trailing output drain, then stop stragglers (background jobs)
     drain(Duration::from_millis(500));
     unsafe { libc::kill(-1, libc::SIGTERM) };

@@ -48,20 +48,25 @@ with `agentcracker apply`).
 Everything else is a subcommand:
 
 ```
-agentcracker [--allow HOST]... [--no-net] [--console] <command> [args...]
-agentcracker ls                      # sessions: age, status, changes, directory
-agentcracker show   [SESSION]        # changes, network log, Claude transcripts, disk use
+agentcracker [--allow HOST]... [--no-net] [--console] [--detach] <command> [args...]
+agentcracker ls     [--json]         # sessions: age, status, changes, directory
+agentcracker show   [--json] [SESSION]   # changes, network log, Claude transcripts, disk use
 agentcracker diff   [SESSION]
 agentcracker apply  [SESSION]
 agentcracker branch [SESSION]        # agent's commits -> branch agentcracker/<id>
 agentcracker resume [SESSION] [command...]
 agentcracker shell  [SESSION]
+agentcracker wait   [--json] [SESSION...]   # for --detach'ed sessions
+agentcracker stop   [SESSION...]     # end running sessions, keeping their changes
 agentcracker rm     SESSION...
 agentcracker refresh                 # rebuild /usr + toolchain snapshots now
 ```
 
 `SESSION` is an id prefix and defaults to the latest session for the
-current directory.  `man agentcracker` (or `man -l man/agentcracker.1` in the source
+current directory.  `--detach`, `wait`, `stop` and `--json` let scripts
+and orchestrators run several agents at once, each in its own VM, and
+compare their results; applying always stays a separate, deliberate
+step.  `man agentcracker` (or `man -l man/agentcracker.1` in the source
 tree) has the full reference and a worked example of a session's life.  See [Implementation notes](#implementation-notes) for
 how the build differs from the design below.
 

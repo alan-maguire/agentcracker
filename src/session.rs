@@ -109,6 +109,10 @@ pub struct Meta {
     /// show`.
     #[serde(default)]
     pub error: Option<String>,
+    /// While a VM runs: the process id of the agentcracker process running
+    /// it (`agentcracker stop` sends it SIGTERM).
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 /// An open session: its directory and its metadata.  Changes to `meta` are

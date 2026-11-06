@@ -9,6 +9,7 @@ agentcracker \- run coding agents in disposable Firecracker microVMs
 .IR HOST ]...\&
 .RB [ \-\-no\-net ]
 .RB [ \-\-console ]
+.RB [ \-\-detach ]
 .I command
 .RI [ args ...]
 .br
@@ -18,8 +19,10 @@ agentcracker \- run coding agents in disposable Firecracker microVMs
 .RI [ args ...]
 .br
 .B agentcracker ls
+.RB [ \-\-json ]
 .br
 .B agentcracker show
+.RB [ \-\-json ]
 .RI [ session ]
 .br
 .B agentcracker diff
@@ -38,6 +41,13 @@ agentcracker \- run coding agents in disposable Firecracker microVMs
 .br
 .B agentcracker shell
 .RI [ session ]
+.br
+.B agentcracker wait
+.RB [ \-\-json ]
+.RI [ session ...]
+.br
+.B agentcracker stop
+.RI [ session ...]
 .br
 .B agentcracker rm
 .IR session ...
@@ -131,6 +141,10 @@ when its host process died,
 .BR crashed ,
 .BR failed ),
 change counts (+added ~modified \-deleted), directory and command.
+With
+.BR \-\-json ,
+a JSON array instead (see
+.BR "JSON OUTPUT" ).
 .TP
 .BR show " [\fIsession\fR]"
 Everything recorded about a session: command, times, status and boot
@@ -178,6 +192,23 @@ Like
 .B resume
 with the user's login shell as the command.
 .TP
+.BR wait " [\fB\-\-json\fR] [\fIsession\fR...]"
+Wait until each session has ended, printing
+.I "ID status"
+(or a JSON object) as each one does.  The exit status is the command's
+for a single session; for several, 0 if every one exited 0.  Interrupting
+.B wait
+leaves the sessions running.
+.TP
+.BR stop " [\fIsession\fR...]"
+End running sessions cleanly: the command gets SIGTERM, then SIGKILL 5
+seconds later if it is still there, and the session exports its changes
+and ends as usual, so it can still be diffed, applied or resumed.  Waits
+for each session to end (up to 30 seconds).  A running session cannot be
+removed with
+.BR rm ;
+stop it first.
+.TP
 .BI rm " session" \fR...
 Delete sessions and everything recorded for them.  The project directory
 is never touched.
@@ -219,6 +250,20 @@ No network at all.
 .TP
 .B \-\-console
 Show the guest kernel console (for debugging).
+.TP
+.B \-\-detach
+Start the session in the background: print its id and return at once.
+The command gets no input and no terminal; its standard output and error
+go to the session's
+.I stdout
+and
+.I stderr
+files.  There is no review menu: the session ends as an ordinary kept
+session.  With
+.BR \-\-json ,
+print
+.B {\(dqid\(dq: ..., \(dqdir\(dq: ...}
+instead of the bare id.
 .TP
 .BR \-h ", " \-\-help
 Print a usage summary.
@@ -284,6 +329,104 @@ setgid bits, and never writes inside
 the agent's commits are brought over with
 .B branch
 instead.
+.SH JSON OUTPUT
+.BR "ls \-\-json" ,
+.BR "show \-\-json" ,
+.B "wait \-\-json"
+and
+.B "\-\-detach \-\-json"
+print JSON for scripts and orchestrators.  Every object carries
+.BR \(dqformat\(dq:\ 1 ;
+fields may be added within a format, but removing or changing one bumps
+it.
+.PP
+.B ls
+prints an array, and
+.B wait
+one object per line, of the short form:
+.BR id ,
+.BR dir ,
+.B command
+(an array),
+.B status
+(as in
+.BR ls ),
+.B exit_code
+(or null),
+.BR running ,
+.B created
+and
+.B ended
+(Unix times), and
+.B changes
+.RB ( added ,
+.BR modified ,
+.BR deleted ,
+.BR inside_git ;
+null before the first export).
+.PP
+.B show
+adds
+.BR boots ,
+.BR runtime_secs ,
+.BR error ,
+.B vm
+.RB ( vcpus ,
+.BR memory_mib ,
+.BR net ,
+.BR allow ),
+.B git
+.RB ( base ,
+.B agent_head
+as
+.BR {branch,\ commit} ,
+.BR imported_branch ),
+.BR applied_at ,
+.B changes.files
+(one object per change:
+.BR path ,
+.B status
+.RB ( added ,
+.BR modified ,
+.BR deleted ),
+.B type
+.RB ( file ,
+.BR symlink ,
+.BR dir ,
+.BR deleted ),
+.B mode
+(octal),
+.BR conflict ,
+.BR runs_on_host ,
+.BR already_on_host ,
+and for symlinks
+.B target
+and
+.BR points_outside ),
+.B network
+(per host:
+.BR host ,
+.BR allowed ,
+.BR denied ),
+.B transcripts
+.RB ( id ,
+.BR messages ,
+.BR last ,
+.BR first_prompt ),
+.B disk
+.RB ( own ,
+.B shared
+bytes) and
+.B paths
+.RB ( session ,
+.BR stdout ,
+.BR stderr ,
+.BR transcripts ).
+.PP
+Strings that come from the guest (paths, symlink targets, host names,
+transcript text) are the agent's: JSON escaping makes them safe to carry,
+not safe to act on.  A program reading this output \(em especially an agent
+\(em should treat them as untrusted data.
 .SH CONFIGURATION
 Settings are read from
 .I ~/.config/agentcracker/config.toml
@@ -386,6 +529,11 @@ and
 (the changes, as exported on exit),
 .I state/
 (the agent's transcripts),
+.I stdout
+and
+.I stderr
+(output of sessions run with
+.BR \-\-detach ),
 .I net.log
 and
 .IR console.log .
@@ -418,10 +566,20 @@ the command's exit status (128 +
 .I N
 if it was killed by signal
 .IR N ),
-or 1 if the VM could not be started.  Other commands exit 0 on success,
-1 on error (including
+or 1 if the VM could not be started
+.RB ( \-\-detach
+exits 0 once the session is started).
+.B wait
+exits with the command's status (see
+.BR wait ).
+Other commands exit 0 on success, 1 on error (including
 .B apply
-refusing because of conflicts) and 2 for a usage error.
+refusing because of conflicts and
+.B stop
+failing to end a session) and 2 for a usage error.  When standard output
+is closed early (as in
+.BR "agentcracker ls | head \-1" ),
+output stops quietly with status 141.
 .SH EXAMPLES
 The life of one session, from start to finish.
 .SS Start an agent
@@ -497,13 +655,36 @@ removed 3f9a1c2e
 .EE
 .SS Scripted use
 Without a terminal there is no menu: output goes to pipes and a summary
-line ends the run, so sessions can be driven from scripts.
+line ends the run.
 .EX
-$ agentcracker \-\-no\-net sh \-c \(aqmake test\(aq > test.log 2>&1; echo $?
-$ id=$(agentcracker ls | awk \(aqEND {print $1}\(aq)
-$ agentcracker diff "$id" > agent.patch
-$ agentcracker apply "$id" && agentcracker rm "$id"
+$ agentcracker \-\-no\-net make test > test.log 2>&1; echo $?
 .EE
+.SS Several agents at once
+Start each attempt in the background, wait for all of them, compare, and
+apply the one you choose:
+.EX
+$ for t in tasks/*.md; do
+>   agentcracker \-\-detach claude \-p "$(cat "$t")"
+> done > ids
+$ agentcracker wait $(cat ids)
+3f9a1c2e exit 0
+77b0d4e1 exit 0
+c2a9f310 exit 1
+$ for id in $(cat ids); do
+>   agentcracker show \-\-json $id | jq \-c \(aq{id, exit_code, changes: .changes | del(.files)}\(aq
+> done
+$ agentcracker diff 77b0 | less
+$ agentcracker apply 77b0 && agentcracker rm $(cat ids)
+.EE
+.PP
+To end a background session early, keeping what it did so far:
+.EX
+$ agentcracker stop c2a9
+stopped c2a9f310
+.EE
+.PP
+Nothing is applied automatically: an orchestrating script or agent
+prepares and compares, and applying stays a deliberate step.
 .SH SECURITY
 The agent cannot see the host's files outside the project, the user's
 credentials (other than the agent's own), other repositories, or the

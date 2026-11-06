@@ -61,6 +61,9 @@ pub const M_STDIN: u8 = 4;
 pub const M_RESIZE: u8 = 5;
 /// host to guest: end of input (Ctrl-D on a pty, closes stdin otherwise).
 pub const M_STDIN_EOF: u8 = 6;
+/// host to guest: stop the command (SIGTERM to its process group, SIGKILL
+/// 5 s later if it is still there); it then exits and is exported normally.
+pub const M_STOP: u8 = 7;
 /// guest to host: setup is done and the command is starting.
 pub const M_READY: u8 = 10;
 /// guest to host: something failed (UTF-8 message); the guest then powers off.

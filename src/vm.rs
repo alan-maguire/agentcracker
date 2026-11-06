@@ -279,6 +279,20 @@ static WINCH_FD: AtomicI32 = AtomicI32::new(-1);
 /// SIGWINCH handler: writes one byte to [`WINCH_FD`] so the stdin pump
 /// wakes up and sends the new window size.  Only async-signal-safe
 /// operations (an atomic load and `write`).
+/// Write end of the self-pipe the SIGTERM handler signals (see
+/// [`on_term`]); -1 while no session is attached.
+static TERM_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// SIGTERM handler while attached: writes one byte to [`TERM_FD`] so the
+/// stdin pump asks the guest to stop the command, which then exits and is
+/// exported normally (this is how `agentcracker stop` works).
+extern "C" fn on_term(_: libc::c_int) {
+    let fd = TERM_FD.load(Ordering::Relaxed);
+    if fd >= 0 {
+        unsafe { libc::write(fd, b"t".as_ptr().cast(), 1) };
+    }
+}
+
 extern "C" fn on_winch(_: libc::c_int) {
     let fd = WINCH_FD.load(Ordering::Relaxed);
     if fd >= 0 {
@@ -307,16 +321,17 @@ fn pipe() -> Result<(RawFd, RawFd)> {
 /// `ctrl`: the control connection, shared with the receiving side;
 /// `stop_r`, `winch_r`: read ends of the stop pipe and the SIGWINCH
 /// self-pipe.  Returns the thread's handle.
-fn stdin_pump(ctrl: Arc<Mutex<UnixStream>>, stop_r: RawFd, winch_r: RawFd) -> std::thread::JoinHandle<()> {
+fn stdin_pump(ctrl: Arc<Mutex<UnixStream>>, stop_r: RawFd, winch_r: RawFd, term_r: RawFd) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut fds = [
             libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: stop_r, events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: winch_r, events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: term_r, events: libc::POLLIN, revents: 0 },
         ];
         let mut buf = vec![0u8; 16384];
         loop {
-            let r = unsafe { libc::poll(fds.as_mut_ptr(), 3, -1) };
+            let r = unsafe { libc::poll(fds.as_mut_ptr(), 4, -1) };
             if r < 0 {
                 if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                     continue;
@@ -325,6 +340,11 @@ fn stdin_pump(ctrl: Arc<Mutex<UnixStream>>, stop_r: RawFd, winch_r: RawFd) -> st
             }
             if fds[1].revents != 0 {
                 break;
+            }
+            if fds[3].revents != 0 {
+                while unsafe { libc::read(term_r, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+                let _ = write_frame(&mut *ctrl.lock().unwrap(), M_STOP, &[]);
+                fds[3].fd = -1; // once is enough
             }
             if fds[2].revents != 0 {
                 while unsafe { libc::read(winch_r, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
@@ -589,15 +609,19 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
 
     let (stop_r, stop_w) = pipe()?;
     let (winch_r, winch_w) = pipe()?;
+    let (term_r, term_w) = pipe()?;
     WINCH_FD.store(winch_w, Ordering::Relaxed);
+    TERM_FD.store(term_w, Ordering::Relaxed);
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = on_winch as *const () as usize;
         sa.sa_flags = libc::SA_RESTART;
         libc::sigaction(libc::SIGWINCH, &sa, std::ptr::null_mut());
+        sa.sa_sigaction = on_term as *const () as usize;
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
     let mut raw = if tty { RawTerm::enter() } else { None };
-    let pump = stdin_pump(ctrl.clone(), stop_r, winch_r);
+    let pump = stdin_pump(ctrl.clone(), stop_r, winch_r, term_r);
     let stop_pump = |raw: &mut Option<RawTerm>| {
         unsafe { libc::write(stop_w, b"x".as_ptr().cast(), 1) };
         raw.take();
@@ -672,9 +696,11 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
     stop_pump(&mut raw);
     let _ = pump.join();
     WINCH_FD.store(-1, Ordering::Relaxed);
+    TERM_FD.store(-1, Ordering::Relaxed);
     unsafe {
         libc::signal(libc::SIGWINCH, libc::SIG_DFL);
-        for fd in [stop_r, stop_w, winch_r, winch_w] {
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        for fd in [stop_r, stop_w, winch_r, winch_w, term_r, term_w] {
             libc::close(fd);
         }
     }
@@ -686,3 +712,4 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
     }
     Ok(Outcome { exit_code, exported, error: None })
 }
+

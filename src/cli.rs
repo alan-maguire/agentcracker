@@ -20,6 +20,19 @@
 
 use std::path::{Path, PathBuf};
 
+/// `println!` that ends the program quietly (status 141, as if killed by
+/// SIGPIPE) when stdout has gone away, e.g. `agentcracker ls | head -1`.
+/// SIGPIPE itself stays ignored: a proxied connection closing must never
+/// kill a session.
+macro_rules! out {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        if writeln!(std::io::stdout(), $($t)*).is_err() {
+            std::process::exit(141);
+        }
+    }};
+}
+
 use crate::changes::{self, ChangeSet};
 use crate::config::Config;
 use crate::images::{self, Refresh, status};
@@ -31,15 +44,17 @@ const USAGE: &str = "\
 agentcracker - run a coding agent in a disposable Firecracker microVM
 
 usage:
-  agentcracker [--allow HOST]... [--no-net] [--console] <command> [args...]
+  agentcracker [--allow HOST]... [--no-net] [--console] [--detach] <command> [args...]
         run <command> in a new session for the current directory
-  agentcracker ls                       list sessions
-  agentcracker show   [SESSION]         details: changes, network, agent transcripts
+  agentcracker ls     [--json]          list sessions
+  agentcracker show   [--json] [SESSION]   details: changes, network, agent transcripts
   agentcracker diff   [SESSION]         show the session's changes
   agentcracker apply  [SESSION]         write the changes into the real directory
   agentcracker branch [SESSION]         turn the agent's git commits into a host branch
   agentcracker resume [SESSION] [command...]   boot again on the same overlay
   agentcracker shell  [SESSION]         open a shell inside the session
+  agentcracker wait   [--json] [SESSION...]   wait for running sessions to end
+  agentcracker stop   [SESSION...]      end running sessions (changes are kept)
   agentcracker rm     SESSION...        discard sessions
   agentcracker refresh                  rebuild the /usr and toolchain snapshots now
 
@@ -50,6 +65,8 @@ options:
   --allow HOST   also allow HTTPS to HOST (*.example.com for subdomains)
   --no-net       no network at all
   --console      show the guest kernel console (debugging)
+  --detach       run in the background: print the session id and return;
+                 output goes to the session's stdout/stderr files
 
 config: ~/.config/agentcracker/config.toml and ./.agentcracker.toml
   vcpus, memory, net, allow, exclude, exclude_usr, tools, no_tools, home, state, env
@@ -63,6 +80,10 @@ struct Opts {
     no_net: bool,
     /// `--console`: show the guest console.
     console: bool,
+    /// `--detach`: run the session in the background.
+    detach: bool,
+    /// `--json`: machine-readable output.
+    json: bool,
     /// The command and its arguments: everything from the first non-option, or
     /// after `--`.
     rest: Vec<String>,
@@ -76,7 +97,7 @@ struct Opts {
 /// command's own options are left alone.  Returns the options; errors for an
 /// unknown option or an `--allow` without a value.
 fn parse_opts(args: &[String]) -> Result<Opts> {
-    let mut o = Opts { allow: vec![], no_net: false, console: false, rest: vec![] };
+    let mut o = Opts { allow: vec![], no_net: false, console: false, detach: false, json: false, rest: vec![] };
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -92,6 +113,10 @@ fn parse_opts(args: &[String]) -> Result<Opts> {
             o.no_net = true;
         } else if a == "--console" {
             o.console = true;
+        } else if a == "--detach" {
+            o.detach = true;
+        } else if a == "--json" {
+            o.json = true;
         } else if a.starts_with('-') && o.rest.is_empty() {
             crate::bail!("unknown option {a}\n\n{USAGE}");
         } else {
@@ -134,11 +159,13 @@ pub fn run(args: Vec<String>) -> Result<i32> {
             Ok(0)
         }
         "-V" | "--version" | "version" => {
-            println!("agentcracker {}", env!("CARGO_PKG_VERSION"));
+            out!("agentcracker {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
-        "ls" | "list" => cmd_ls(),
-        "show" | "info" => cmd_show(rest.first().map(|s| s.as_str())),
+        "ls" | "list" => cmd_ls(rest),
+        "show" | "info" => cmd_show(rest),
+        "wait" => cmd_wait(rest),
+        "stop" => cmd_stop(rest),
         "diff" => cmd_diff(rest.first().map(|s| s.as_str())),
         "apply" => cmd_apply(rest.first().map(|s| s.as_str())),
         "branch" => cmd_branch(rest.first().map(|s| s.as_str())),
@@ -286,7 +313,10 @@ fn cmd_run(args: &[String]) -> Result<i32> {
         let _ = std::fs::remove_dir_all(&s.dir);
         return Err(e);
     }
-    let code = boot_and_review(&mut s, &cfg, &o.rest.clone(), o.console, true)?;
+    if o.detach {
+        return run_detached(&mut s, &cfg, &o.rest.clone(), true, o.json);
+    }
+    let code = boot_and_review(&mut s, &cfg, &o.rest.clone(), o.console, true, None)?;
     Ok(code)
 }
 
@@ -296,8 +326,8 @@ fn cmd_run(args: &[String]) -> Result<i32> {
 /// commands to inspect them.
 ///
 /// Returns the command's exit status.
-fn boot_and_review(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first: bool) -> Result<i32> {
-    let code = boot_once(s, cfg, cmd, console, first)?;
+fn boot_and_review(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first: bool, lock: Option<std::fs::File>) -> Result<i32> {
+    let code = boot_once(s, cfg, cmd, console, first, lock)?;
     if isatty(0) && isatty(2) {
         review(s, cfg)?;
     } else if let Some(sum) = &s.meta.summary {
@@ -322,8 +352,11 @@ fn boot_and_review(s: &mut Session, cfg: &Config, cmd: &[String], console: bool,
 ///
 /// Returns the command's exit status (1 if there was none).  Errors, after
 /// marking the session `failed`, only if the VM could not be started.
-fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first: bool) -> Result<i32> {
-    let _lock = s.lock()?;
+fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first: bool, lock: Option<std::fs::File>) -> Result<i32> {
+    let _lock = match lock {
+        Some(l) => l,
+        None => s.lock()?,
+    };
     let net = if !s.meta.net {
         "no network".to_string()
     } else {
@@ -335,9 +368,11 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
     status(&format!("session {} · {} vCPU · {} · {}", s.meta.id, s.meta.vcpus, human_bytes(s.meta.mem_mib << 20), net));
     s.meta.status = "running".into();
     s.meta.error = None;
+    s.meta.pid = Some(std::process::id());
     s.save()?;
     let out = crate::vm::boot(s, cfg, cmd, console, first);
     s.meta.ended = Some(now());
+    s.meta.pid = None;
     let out = match out {
         Ok(o) => o,
         Err(e) => {
@@ -456,7 +491,7 @@ fn review(s: &mut Session, cfg: &Config) -> Result<()> {
             's' => {
                 let sh = vec![crate::util::user_shell(unsafe { libc::getuid() })];
                 eprintln!("{}", dim("entering the session; exit the shell to come back here"));
-                boot_once(s, cfg, &sh, false, false)?;
+                boot_once(s, cfg, &sh, false, false, None)?;
             }
             'x' => {
                 if has_changes && s.meta.applied_at.is_none() && prompt_key("Discard unapplied changes? [y/N] ", "yn\n") != Some('y') {
@@ -574,7 +609,58 @@ fn cmd_resume(args: &[String], shell: bool) -> Result<i32> {
     } else {
         rest
     };
-    boot_and_review(&mut s, &cfg, &cmd, o.console, false)
+    if o.detach {
+        return run_detached(&mut s, &cfg, &cmd, false, o.json);
+    }
+    boot_and_review(&mut s, &cfg, &cmd, o.console, false, None)
+}
+
+/// `--detach`: boot the session in a background process and return at once.
+///
+/// The session lock is taken here, before forking, so the session shows as
+/// running (and `wait` works) as soon as this returns; the child inherits
+/// it.  The child leaves the terminal (new session, stdin from /dev/null),
+/// writes the command's output and its own messages to the session's
+/// `stdout` and `stderr` files, and runs the VM without a review.  Prints
+/// the session id (or `{"id", "dir"}` with `json`) and returns 0.
+fn run_detached(s: &mut Session, cfg: &Config, cmd: &[String], first: bool, json: bool) -> Result<i32> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let lock = s.lock()?;
+    let append = |name: &str| std::fs::OpenOptions::new().create(true).append(true).open(s.path(name));
+    let (out, err) = (append("stdout")?, append("stderr")?);
+    let null = std::fs::File::open("/dev/null")?;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    match unsafe { libc::fork() } {
+        -1 => crate::bail!("fork: {}", std::io::Error::last_os_error()),
+        0 => {
+            unsafe {
+                libc::setsid();
+                libc::dup2(null.as_raw_fd(), 0);
+                libc::dup2(out.as_raw_fd(), 1);
+                libc::dup2(err.as_raw_fd(), 2);
+            }
+            drop((null, out, err));
+            let code = match boot_and_review(s, cfg, cmd, false, first, Some(lock)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("agentcracker: {e}");
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
+        _ => {
+            drop(lock); // the child holds the same lock until the VM is gone
+            if json {
+                out!("{}", serde_json::json!({ "id": s.meta.id, "dir": s.meta.cwd }));
+            } else {
+                out!("{}", s.meta.id);
+            }
+            Ok(0)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -611,14 +697,22 @@ fn status_of(s: &Session) -> String {
 
 /// `agentcracker ls`: print a table of all sessions - id, age, status,
 /// change counts, directory and command - oldest first.  Returns 0.
-fn cmd_ls() -> Result<i32> {
+fn cmd_ls(args: &[String]) -> Result<i32> {
+    let (json, rest) = split_json(args);
+    if let Some(a) = rest.first() {
+        crate::bail!("ls takes no arguments (got {a:?})");
+    }
     let all = session::list();
+    if json {
+        out!("{}", serde_json::to_string_pretty(&all.iter().map(session_brief).collect::<Vec<_>>())?);
+        return Ok(0);
+    }
     if all.is_empty() {
         eprintln!("no sessions");
         return Ok(0);
     }
     let t = now();
-    println!("{:<9} {:>4}  {:<8} {:<12} {:<34} COMMAND", "ID", "AGE", "STATUS", "CHANGES", "DIRECTORY");
+    out!("{:<9} {:>4}  {:<8} {:<12} {:<34} COMMAND", "ID", "AGE", "STATUS", "CHANGES", "DIRECTORY");
     for s in &all {
         let ch = s.meta.summary.as_ref().map(changes::short_summary).unwrap_or_else(|| "?".into());
         let mut dir = tilde(&s.meta.cwd);
@@ -630,7 +724,7 @@ fn cmd_ls() -> Result<i32> {
         if cmd.chars().count() > 40 {
             cmd = cmd.chars().take(39).collect::<String>() + "…";
         }
-        println!("{:<9} {:>4}  {:<8} {:<12} {:<34} {}", s.meta.id, human_age(t.saturating_sub(s.meta.created)), status_of(s), ch, dir, cmd);
+        out!("{:<9} {:>4}  {:<8} {:<12} {:<34} {}", s.meta.id, human_age(t.saturating_sub(s.meta.created)), status_of(s), ch, dir, cmd);
     }
     Ok(0)
 }
@@ -643,11 +737,16 @@ fn cmd_ls() -> Result<i32> {
 ///
 /// `arg`: optional session id prefix.  Returns 0; errors if the session
 /// cannot be found.
-fn cmd_show(arg: Option<&str>) -> Result<i32> {
-    let s = session::find(arg, &cwd()?)?;
+fn cmd_show(args: &[String]) -> Result<i32> {
+    let (json, rest) = split_json(args);
+    let s = session::find(rest.first().map(|a| a.as_str()), &cwd()?)?;
+    if json {
+        out!("{}", serde_json::to_string_pretty(&session_json(&s))?);
+        return Ok(0);
+    }
     let m = &s.meta;
     let t = now();
-    let row = |k: &str, v: String| println!("{k:<10} {v}");
+    let row = |k: &str, v: String| out!("{k:<10} {v}");
     row("session", m.id.clone());
     row("directory", tilde(&m.cwd));
     row("command", crate::util::safe_text(m.cmd.join(" ").as_bytes(), false));
@@ -802,7 +901,7 @@ fn cmd_rm(args: &[String]) -> Result<i32> {
         let s = session::find(Some(a), &cwd)?;
         let id = s.meta.id.clone();
         s.remove()?;
-        println!("removed {id}");
+        out!("removed {id}");
     }
     Ok(0)
 }
@@ -827,4 +926,237 @@ fn cmd_refresh(args: &[String]) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// scripting: --json, wait, stop
+// ---------------------------------------------------------------------------
+
+/// Version of the `--json` output.  Adding fields keeps it; removing or
+/// changing the meaning of one bumps it.
+const JSON_FORMAT: u32 = 1;
+
+/// Split `--json` out of a subcommand's arguments.  Returns whether it was
+/// there, and the remaining arguments.
+fn split_json(args: &[String]) -> (bool, Vec<String>) {
+    let json = args.iter().any(|a| a == "--json");
+    (json, args.iter().filter(|a| *a != "--json").cloned().collect())
+}
+
+/// The status word `ls` shows, plus whether a VM is running.
+fn status_json(s: &Session) -> (String, bool) {
+    let running = s.is_running();
+    let st = if running {
+        "running".to_string()
+    } else {
+        match s.meta.status.as_str() {
+            "running" | "starting" => "stopped".into(),
+            st => st.to_string(),
+        }
+    };
+    (st, running)
+}
+
+/// One session in brief, as `ls --json` and `wait --json` print it.
+fn session_brief(s: &Session) -> serde_json::Value {
+    let (status, running) = status_json(s);
+    let m = &s.meta;
+    serde_json::json!({
+        "format": JSON_FORMAT,
+        "id": m.id,
+        "dir": m.cwd,
+        "command": m.cmd,
+        "status": status,
+        "exit_code": m.exit_code,
+        "running": running,
+        "created": m.created,
+        "ended": m.ended,
+        "changes": m.summary.as_ref().map(|x| serde_json::json!({
+            "added": x.added, "modified": x.modified, "deleted": x.deleted, "inside_git": x.git_internal,
+        })),
+    })
+}
+
+/// Everything `show` reports, as `show --json` prints it.  Strings are the
+/// agent's where they come from the guest: JSON escaping makes them safe
+/// to carry, not safe to act on.
+fn session_json(s: &Session) -> serde_json::Value {
+    let m = &s.meta;
+    let mut v = session_brief(s);
+    let cs = ChangeSet::load(s).ok().flatten();
+    let files: Vec<serde_json::Value> = cs
+        .iter()
+        .flat_map(|cs| cs.shown())
+        .map(|c| {
+            let status = match c.st {
+                changes::St::Added => "added",
+                changes::St::Modified => "modified",
+                changes::St::Deleted => "deleted",
+                changes::St::Container => "unchanged",
+            };
+            let (ty, mode, target) = match &c.op {
+                changes::Op::File { mode, .. } => ("file", Some(format!("{:o}", mode & 0o777)), None),
+                changes::Op::Symlink { target } => ("symlink", None, Some(String::from_utf8_lossy(target).into_owned())),
+                changes::Op::Dir { mode } => ("dir", Some(format!("{:o}", mode & 0o777)), None),
+                changes::Op::Delete => ("deleted", None, None),
+            };
+            let mut f = serde_json::json!({
+                "path": String::from_utf8_lossy(&c.raw),
+                "status": status,
+                "type": ty,
+                "conflict": c.conflict,
+                "runs_on_host": c.sensitive,
+                "already_on_host": c.in_place,
+            });
+            if let Some(mode) = mode {
+                f["mode"] = mode.into();
+            }
+            if let Some(t) = target {
+                f["points_outside"] = changes::symlink_escapes(&c.raw, t.as_bytes()).into();
+                f["target"] = t.into();
+            }
+            if c.nested > 0 {
+                f["entries"] = c.nested.into();
+            }
+            f
+        })
+        .collect();
+    let agent_head = cs.as_ref().and_then(|cs| changes::agent_head(cs, m.git_head.as_deref()));
+    let (own, shared) = s.disk_usage();
+    let o = v.as_object_mut().unwrap();
+    o.insert("boots".into(), m.boots.into());
+    o.insert("runtime_secs".into(), m.runtime.into());
+    o.insert("error".into(), m.error.clone().into());
+    o.insert("vm".into(), serde_json::json!({ "vcpus": m.vcpus, "memory_mib": m.mem_mib, "net": m.net, "allow": m.allow }));
+    o.insert(
+        "git".into(),
+        serde_json::json!({
+            "base": m.git_head,
+            "agent_head": agent_head.map(|(sha, branch)| serde_json::json!({ "branch": branch, "commit": sha })),
+            "imported_branch": m.branch,
+        }),
+    );
+    o.insert("applied_at".into(), m.applied_at.into());
+    if let Some(c) = o.get_mut("changes").and_then(|c| c.as_object_mut()) {
+        c.insert("files".into(), files.into());
+    }
+    o.insert(
+        "network".into(),
+        crate::proxy::summarize(&s.path("net.log"))
+            .into_iter()
+            .map(|(host, a, d)| serde_json::json!({ "host": host, "allowed": a, "denied": d }))
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    o.insert(
+        "transcripts".into(),
+        changes::transcripts(s)
+            .into_iter()
+            .map(|t| serde_json::json!({ "id": t.id, "messages": t.messages, "last": t.last, "first_prompt": t.first_prompt }))
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    o.insert("disk".into(), serde_json::json!({ "own": own, "shared": shared }));
+    let opt = |name: &str| Some(s.path(name)).filter(|p| p.exists());
+    o.insert(
+        "paths".into(),
+        serde_json::json!({
+            "session": s.dir,
+            "stdout": opt("stdout"),
+            "stderr": opt("stderr"),
+            "transcripts": opt("state/.claude/projects"),
+        }),
+    );
+    v
+}
+
+/// Resolve the session arguments of `wait` and `stop`: id prefixes, or the
+/// latest session for the current directory when there are none.
+fn sessions_from(args: &[String]) -> Result<Vec<Session>> {
+    let cwd = cwd()?;
+    if args.is_empty() {
+        return Ok(vec![session::find(None, &cwd)?]);
+    }
+    args.iter().map(|a| session::find(Some(a), &cwd)).collect()
+}
+
+/// `agentcracker wait [--json] [SESSION...]`: block until each session's VM
+/// has gone, printing `ID STATUS` (or a JSON object) as each one ends.
+///
+/// Returns the command's exit status for a single session; for several, 0
+/// if every one exited 0 and 1 otherwise.
+fn cmd_wait(args: &[String]) -> Result<i32> {
+    let (json, rest) = split_json(args);
+    let all = sessions_from(&rest)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    for s in &all {
+        let (lock, dir) = (s.path("lock"), s.dir.clone());
+        let tx = tx.clone();
+        // the running VM's process holds the lock; getting it means it is done
+        std::thread::spawn(move || {
+            let _ = crate::util::lock(&lock);
+            let _ = tx.send(dir);
+        });
+    }
+    drop(tx);
+    let mut codes = Vec::new();
+    for dir in rx {
+        let s = Session::load_dir(&dir)?;
+        if json {
+            out!("{}", serde_json::to_string(&session_brief(&s))?);
+        } else {
+            let (st, _) = status_json(&s);
+            let st = match (st.as_str(), s.meta.exit_code) {
+                ("exited", Some(c)) => format!("exit {c}"),
+                _ => st,
+            };
+            out!("{} {st}", s.meta.id);
+        }
+        codes.push(s.meta.exit_code);
+    }
+    Ok(match codes.as_slice() {
+        [c] => c.unwrap_or(1),
+        cs => i32::from(!cs.iter().all(|c| *c == Some(0))),
+    })
+}
+
+/// `agentcracker stop [SESSION...]`: end running sessions cleanly.
+///
+/// Sends SIGTERM to each session's agentcracker process, which asks the
+/// guest to stop the command (SIGTERM, then SIGKILL 5 s later); the
+/// session then exports its changes and ends as usual.  Waits up to 30 s
+/// for each.  Returns 0 if every session is stopped (or was not running).
+fn cmd_stop(args: &[String]) -> Result<i32> {
+    let all = sessions_from(args)?;
+    let mut ok = true;
+    for s in &all {
+        let id = &s.meta.id;
+        if !s.is_running() {
+            out!("{id} is not running");
+            continue;
+        }
+        // the pid is recorded just after the lock is taken; allow for that
+        let mut pid = None;
+        for _ in 0..50 {
+            pid = Session::load_dir(&s.dir).ok().and_then(|x| x.meta.pid);
+            if pid.is_some() || !s.is_running() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if let Some(pid) = pid {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while s.is_running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if s.is_running() {
+            eprintln!("agentcracker: {id} is still running");
+            ok = false;
+        } else {
+            out!("stopped {id}");
+        }
+    }
+    Ok(i32::from(!ok))
 }
