@@ -2,8 +2,11 @@
 # GitHub-hosted runner, which supports KVM.  Any failing test fails the job.
 name: tests
 
+# main and pull requests only (a pushed PR branch would otherwise run
+# twice), plus on demand
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -17,7 +20,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     env:
       # nested virtualisation on a shared runner is slower than a workstation;
       # these are t02-timing.sh's limits (seconds)
@@ -87,8 +90,9 @@ jobs:
             ~/.cargo/git
             target
             build/acinit-target
-          key: cargo-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('src/**') }}
-          restore-keys: cargo-${{ hashFiles('Cargo.lock') }}-
+          # one entry per Cargo.lock, not per commit: our own crate rebuilds in
+          # seconds, and a ~1G entry per push would churn the 10G repo cache
+          key: cargo-${{ hashFiles('Cargo.lock') }}
 
       - name: Build and test
         run: |
@@ -140,3 +144,4 @@ jobs:
             build/tests/**/stdout
             build/tests/**/stderr
           if-no-files-found: ignore
+          retention-days: 7
