@@ -175,7 +175,9 @@ The session's activity as one timeline, in local time: every connection
 attempt the agent made through the egress proxy, with its verdict
 .RB ( ALLOW ,
 .BR DENY ,
-\&...), and every tool call in the agent's Claude Code transcripts,
+\&...), every test kernel it booted with
+.B acrboot
+(with the outcome), and every tool call in the agent's Claude Code transcripts,
 subagents' included: shell commands, files read and edited, fetched URLs,
 web searches.  Searches run on Anthropic's servers and are marked as
 never seen by the proxy.  The proxy sees only
@@ -388,6 +390,52 @@ host.
 starts it afresh, and
 .B cache = false
 in the configuration turns it off.
+.SH BOOTING TEST KERNELS
+With
+.B boot = true
+in the user's configuration, every session has an
+.B acrboot
+command, for an agent working on a Linux kernel to run the kernel it
+built:
+.PP
+.EX
+acrboot [\-\-cpus N] [\-\-mem SIZE] [\-\-timeout SECS] [\-\-append ARGS]
+        [\-\-disk FILE]... VMLINUX
+.EE
+.PP
+The kernel (and the disks) go to the host, which boots them in a microVM
+of their own and streams its serial console back.
+.B acrboot
+exits 0 when the kernel shut the VM down, 1 on a kernel panic, 124 on a
+timeout and 2 on an error.  The kernel must be the uncompressed ELF
+.I vmlinux
+(not a
+.IR bzImage )
+and built to boot under Firecracker: virtio-mmio with command-line
+devices, virtio-blk for disks, an 8250 serial console.  End the boot with
+a reboot (for KUnit,
+.BR kunit_shutdown=reboot ).
+Each
+.B \-\-disk
+is attached as a read-write copy, the first as
+.IR /dev/vda ,
+which is the root device unless
+.B \-\-append
+sets
+.BR root= .
+.PP
+The test VM has no network, at most the session's CPUs and memory
+(default 2 CPUs and 1G), and a timeout (default 600 seconds); it is
+stopped a few seconds after a panic, and when the session ends.  One runs
+at a time per session.  Each boot's console is kept as
+.I boots/N.console
+in the session, and each boot appears in
+.BR "agentcracker log" .
+.PP
+It is off by default and cannot be turned on by a project's
+.IR .agentcracker.toml :
+it gives the agent ring 0 in a VM, so the boundary becomes KVM and
+Firecracker's device emulation facing a kernel the agent controls.
 .SH APPLYING CHANGES
 Each change is listed with a letter:
 .B A
@@ -689,6 +737,13 @@ saved into the session on every exit.
 Extra environment variables passed into the guest (terminal, locale,
 editor, pager and the agent profile's variables are passed by default).
 .TP
+.BR boot " = true|false"
+Give sessions the
+.B acrboot
+command (default: false; see
+.BR "BOOTING TEST KERNELS" ).
+Only the user's configuration may set it.
+.TP
 .BR cache " = true|false"
 Give sessions the project's persistent build cache as
 .I ~/.cache
@@ -762,9 +817,14 @@ and
 .I stderr
 (output of sessions run with
 .BR \-\-detach ),
-.I net.log
+.IR net.log ,
+.I console.log
+and, with
+.BR acrboot ,
+.I boot.log
 and
-.IR console.log .
+.I boots/
+(each test boot's console).
 .TP
 .I ~/.local/state/agentcracker/caches/KEY/
 One directory per project with a build cache:

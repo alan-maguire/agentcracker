@@ -1294,6 +1294,9 @@ fn cmd_log(args: &[String]) -> Result<i32> {
     let s = session::find(rest.first().map(|a| a.as_str()), &cwd()?)?;
     let net = s.path("net.log");
     let (mut events, mut off) = activity::net_events(&net, 0);
+    let boots = s.path("boot.log");
+    let (b, mut boff) = activity::boot_events(&boots, 0);
+    events.extend(b);
     let tools = activity::tool_events(&s);
     let seen: std::collections::HashSet<(u64, String, String)> = tools.iter().map(|e| (e.time.to_bits(), e.kind.clone(), e.detail.clone())).collect();
     events.extend(tools);
@@ -1315,8 +1318,12 @@ fn cmd_log(args: &[String]) -> Result<i32> {
     if follow && s.is_running() {
         loop {
             let running = s.is_running();
-            let (new, o) = activity::net_events(&net, off);
+            let (mut new, o) = activity::net_events(&net, off);
             off = o;
+            let (b, o) = activity::boot_events(&boots, boff);
+            boff = o;
+            new.extend(b);
+            new.sort_by(|a, b| a.time.total_cmp(&b.time));
             new.iter().for_each(emit);
             if !running {
                 break;

@@ -323,6 +323,7 @@ $PREFIX/lib/agentcracker/{acinit,firecracker,vmlinux,seccomp.bpf}
 ~/.local/state/agentcracker/sessions/<id>/   ($XDG_STATE_HOME)
   meta.json  manifest.bin  lower.img  [lower-delta.img]  scratch.img
   changes.stream  state.stream  state/  console.log  net.log  lock  tmp/
+  [boot.log  boots/<n>.console]       acrboot: one line per test boot, its console
   [stdout  stderr]                    output of --detach'ed runs
 
 ~/.local/state/agentcracker/caches/<key>/    build cache per project; key: FNV of the path
@@ -373,6 +374,15 @@ STDIN_EOF and STOP frames from the host and READY, STDOUT, STDERR, ERROR
 and EXIT from the guest.  The guest drops connections from any CID but
 the host's.
 
+### Boot connections (vsock port 1027)
+
+Only with `boot = true`, which the host checks by listening on
+`v.sock_1027` at all.  Guest-initiated by `acrboot` (`src/acrboot.rs`):
+BOOT_REQ (30, `Request` as JSON: CPUs, memory, timeout, extra command
+line, number of disks), then for the kernel and each disk BLOB* (31)
+and BLOB_END (32); the host answers CONSOLE* (33, the test VM's serial
+output) and BOOT_RESULT (34, `Outcome` as JSON).  One request at a time.
+
 ### Proxy connections (vsock port 1025)
 
 Each is a raw TCP byte stream from a guest client: an HTTP `CONNECT`
@@ -417,6 +427,7 @@ reaches the host, and how each one is handled:
 | Terminal output | Every guest-derived string agentcracker prints (paths, symlink targets, diffs on a terminal, branch names, host names, transcript text, guest errors, console tails) goes through `util::safe_text`, which shows control, C1 and bidi-override characters as escapes; the terminal is soft-reset after an interactive session; the proxy refuses CONNECT targets that are not host names or IP literals. |
 | Secrets in the snapshots | The project snapshot's `.git/config` has `user:token@` stripped from URLs and `extraheader` lines dropped; the toolchain snapshot excludes cargo, npm, PyPI, netrc and git credential files; new sessions warn about credential-like project files (`images::credential_like`). |
 | Network | No NIC; HTTPS `CONNECT` only, to allowlisted hosts (port 443 unless `host:port` is listed); DNS resolved on the host; decisions logged. |
+| Test kernels (`acrboot`) | Off unless the user's config says `boot = true` (a project's cannot).  The request is small JSON with every value clamped (CPUs and memory at most the session's, timeout, at most 8 disks); the kernel (≤2G) and disks (≤32G) are written to files and never parsed.  The test VM is a separate Firecracker with the same seccomp filter, no network and no vsock, killed on timeout, a few seconds after a panic, and when the session ends (`PR_SET_PDEATHSIG` too).  The agent controls that VM's kernel, so the boundary there is KVM and Firecracker's devices against ring 0. |
 | Firecracker | Runs as the user, with the compiled seccomp filter.  **No jailer**: it needs root, which conflicts with the rootless goal, so there is no chroot or cgroup limit around the VMM. |
 
 What goes into the guest is limited too.  `/etc` is copied from an
@@ -444,6 +455,7 @@ All source is in `src/`.
 | `guest.rs` | acinit: mounts, overlays, seed, proxy relay, command, export, poweroff. |
 | `agent.rs` | Agent profiles (Claude Code, Codex): hosts, seeded files, login, state, environment. |
 | `activity.rs` | The `log` timeline: network log and transcript tool calls. |
+| `acrboot.rs` | `acrboot`: the guest command, and the host side that boots test kernels in microVMs of their own. |
 | `buildcache.rs` | Per-project build caches (the guest's `~/.cache`): attach with a lock, list, drop. |
 | `changes.rs` | Change classification, diff, confined apply, branch import, agent state. |
 | `util.rs` | Errors, hashing, paths, locks, glob/excludes, formatting, prompts. |
@@ -462,6 +474,18 @@ and `Profile::path` resolves a path in the agent's directory, honouring
 `vm::credential_path` and `vm::guest_env` take the profile;
 `changes::transcripts` reads Claude's or Codex's transcripts, and
 `activity::tool_events` both formats.
+
+### `acrboot.rs`
+
+Both sides of booting test kernels.  `client` is the guest command
+(`main` dispatches to it when the program is called `acrboot`; acinit
+links `/usr/bin/acrboot` to itself): it checks the kernel is an ELF
+image, sends the request and files, and copies the console to stdout.
+`serve` is the host side, started by `vm::boot` when `boot = true`:
+`handle` receives the files (`recv_file`, size-capped), runs Firecracker
+on them, streams the console back while watching for a panic, applies
+the timeout, and logs the boot to `boot.log`.  `stop` ends a running
+test VM when the session does.
 
 ### `buildcache.rs`
 
@@ -629,6 +653,9 @@ format events, escaping the agent's text.
   (default `Error`).
 - `<session>/net.log`: every proxy decision.  `agentcracker show`
   summarises it.
+- `<session>/boots/<n>.console`: the full console of each `acrboot`
+  boot; `upload/firecracker.log` holds the test VM's Firecracker log
+  while it runs.
 - `agentcracker shell [SESSION]`: a shell inside a session's VM, on the
   same disk.
 - `AGENTCRACKER_LIB=<dir>`: use the assets in `<dir>` (e.g. a different

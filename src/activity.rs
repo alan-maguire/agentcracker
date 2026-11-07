@@ -23,7 +23,7 @@ use crate::session::Session;
 pub struct Event {
     /// Unix time, with fractions of a second when known.
     pub time: f64,
-    /// `net`, or the tool's name in lower case (`bash`, `read`, `edit`,
+    /// `net`, `boot`, or the tool's name in lower case (`bash`, `read`, `edit`,
     /// `webfetch`, `websearch`, ...).
     pub kind: String,
     /// The connection target, the command, the file, the URL, the query...
@@ -51,6 +51,37 @@ pub fn net_events(path: &Path, from: u64) -> (Vec<Event>, u64) {
         let (Some(t), Some(v), Some(target)) = (it.next(), it.next(), it.next()) else { continue };
         let Ok(time) = t.parse::<f64>() else { continue };
         out.push(Event { time, kind: "net".into(), detail: target.to_string(), verdict: Some(v.to_string()), server_side: false });
+    }
+    (out, from + end as u64)
+}
+
+/// Parse `boot.log` (test kernels booted with `acrboot`, see
+/// [`crate::acrboot`]) from byte offset `from`, like [`net_events`].  Each
+/// line is `<time> <outcome> <secs> <kernel bytes> <disks> <append...>`.
+pub fn boot_events(path: &Path, from: u64) -> (Vec<Event>, u64) {
+    use std::io::{Read, Seek};
+    let mut out = Vec::new();
+    let Ok(mut f) = std::fs::File::open(path) else { return (out, from) };
+    if f.seek(std::io::SeekFrom::Start(from)).is_err() {
+        return (out, from);
+    }
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    let end = buf.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    for line in String::from_utf8_lossy(&buf[..end]).lines() {
+        let mut it = line.splitn(6, ' ');
+        let (Some(t), Some(outcome), Some(secs), Some(size), Some(disks)) = (it.next(), it.next(), it.next(), it.next(), it.next()) else { continue };
+        let Ok(time) = t.parse::<f64>() else { continue };
+        let size = crate::util::human_bytes(size.parse().unwrap_or(0));
+        let disks = match disks { "0" => String::new(), "1" => ", 1 disk".into(), n => format!(", {n} disks") };
+        let append = it.next().filter(|a| !a.is_empty()).map(|a| format!(": {a}")).unwrap_or_default();
+        out.push(Event {
+            time,
+            kind: "boot".into(),
+            detail: format!("{size} kernel{disks}, {secs}s{append}"),
+            verdict: Some(outcome.to_ascii_uppercase()),
+            server_side: false,
+        });
     }
     (out, from + end as u64)
 }

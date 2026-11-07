@@ -173,7 +173,7 @@ fn overlay_layers(lowers: &[&str], scratch_name: &str, target: &str) -> Result<(
 /// (read, write, shutdown) are used on it, and those work on any socket.
 /// Errors if the socket cannot be created or nothing listens on the host
 /// yet.
-fn vsock_connect(port: u32) -> io::Result<UnixStream> {
+pub fn vsock_connect(port: u32) -> io::Result<UnixStream> {
     unsafe {
         let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 {
@@ -857,6 +857,8 @@ fn run() -> Result<()> {
     // the new root: base + writable layer, then /usr, toolchains, project
     overlay("/lower/base", "root", NEWROOT)?;
     overlay("/lower/usr", "usr", &format!("{NEWROOT}/usr"))?;
+    // acinit is also the acrboot command (it says so if booting is off)
+    let _ = std::os::unix::fs::symlink("/acinit", format!("{NEWROOT}/usr/bin/acrboot"));
     let nr = Path::new(NEWROOT);
     let home_rel = Path::new(&cfg.home).strip_prefix("/").unwrap_or(Path::new(""));
     mkdirs_owned(nr, home_rel, 0, 0)?;

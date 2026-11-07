@@ -288,6 +288,51 @@ output, use ccache: `make CC="ccache gcc"`).
   size and last use; `show` reports the session's.  `cache = false` in
   the config turns it off.
 
+### Booting the agent's kernel: `acrboot`
+
+An agent working on a kernel can build it but not run it: Firecracker
+offers no nested virtualisation, so virtme-ng and QEMU are out.  The host
+can boot it, though.  With `boot = true` in `~/.config/agentcracker/config.toml`,
+every session has an `acrboot` command:
+
+```
+acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]... VMLINUX
+```
+
+It sends the kernel (and any disks) to the host, which boots it in a
+microVM of its own and streams the serial console back; `acrboot` exits
+0 when the kernel shut the VM down, 1 on a panic, 124 on a timeout, 2 on
+an error.  Two uses:
+
+```
+acrboot --append "kunit.filter_glob=list* kunit_shutdown=reboot" vmlinux   # built-in KUnit suites
+acrboot --disk rootfs.img vmlinux                                          # a root disk (/dev/vda)
+```
+
+- **The kernel** must be the uncompressed ELF `vmlinux` (Firecracker does
+  not boot a `bzImage`) with a configuration Firecracker can boot:
+  virtio-mmio (`CONFIG_VIRTIO_MMIO`, `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES`),
+  `CONFIG_VIRTIO_BLK` for disks, and an 8250 serial console.  Firecracker's
+  own guest configs (`firecracker/resources/guest_configs/`) are a known
+  good starting point.  End a boot with `reboot` (`kunit_shutdown=reboot`,
+  `reboot -f`): the VM stops when the kernel resets it.
+- **The test VM** gets no network and no vsock, its disks as copies
+  (read-write, discarded after), at most the session's CPUs and memory
+  (default 2 CPUs and 1G), and a timeout (default 10 minutes).  It is
+  stopped a few seconds after a panic, and when the session ends.  One
+  runs at a time per session; another `acrboot` waits its turn.
+- **On record.**  Each boot's console is kept in the session
+  (`boots/<n>.console`) and each boot is a `boot` line in
+  `agentcracker log` (`boot  PANIC  29M kernel, 1.3s: panic=0`).
+- **Opt-in, and only by you.**  It hands the agent ring 0 in a VM, so the
+  boundary becomes KVM and Firecracker's device emulation facing a guest
+  kernel the agent controls.  That is Firecracker's own threat model, but
+  more than a session otherwise exposes, so it is off by default, and a
+  project's `.agentcracker.toml` cannot turn it on (a cloned repository
+  must not grant that to its agents).  The host never parses what it is
+  sent: the kernel and disks are size-capped files given to Firecracker;
+  only the small JSON request is read, and its values are clamped.
+
 ## Kernel and root filesystem: the host's own userspace
 
 The usual way to give a sandbox tools is an image: a Dockerfile, an
@@ -360,6 +405,7 @@ The config file can add or remove directories explicitly:
 vcpus   = 8
 memory  = "8G"
 cache   = true            # the project's persistent ~/.cache (default)
+# boot  = true            # acrboot (user config only; off by default)
 exclude = ["build/", "*.o"]
 allow   = ["api.anthropic.com", "github.com", "pypi.org"]
 tools   = ["~/.rustup", "~/.cargo", "/opt/llvm-19"]

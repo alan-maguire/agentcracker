@@ -5,7 +5,7 @@
 //! 1. `~/.config/agentcracker/config.toml` (respecting `$XDG_CONFIG_HOME`)
 //! 2. `.agentcracker.toml` in the project directory
 //!
-//! Scalars (`vcpus`, `memory`, `net`, `agent`, `cache`) in a later file override earlier
+//! Scalars (`vcpus`, `memory`, `net`, `agent`, `cache`, `boot`) in a later file override earlier
 //! ones.  Lists (`allow`, `exclude`, `exclude_usr`, `tools`, `no_tools`,
 //! `home`, `state`, `env`) are appended, so a project can add to the user's
 //! settings but not take anything away.  Unknown keys are an error, so a
@@ -39,6 +39,7 @@ struct File {
     env: Option<Vec<String>>,
     agent: Option<String>,
     cache: Option<bool>,
+    boot: Option<bool>,
 }
 
 /// The effective configuration: built-in defaults with both config files
@@ -80,6 +81,10 @@ pub struct Config {
     /// Give sessions the project's persistent build cache as `~/.cache`
     /// (see [`crate::buildcache`]).  Default: on.
     pub cache: bool,
+    /// Let the agent boot kernels it built in a microVM of their own
+    /// (`acrboot`, see [`crate::acrboot`]).  Default: off; settable only in
+    /// the user's config, never by a project.
+    pub boot: bool,
 }
 
 /// Always excluded from the /usr snapshot: useless in a guest (kernel
@@ -128,10 +133,15 @@ impl Config {
             env: vec![],
             agent: None,
             cache: true,
+            boot: false,
         };
-        for p in [crate::util::config_dir().join("config.toml"), cwd.join(".agentcracker.toml")] {
+        for (i, p) in [crate::util::config_dir().join("config.toml"), cwd.join(".agentcracker.toml")].into_iter().enumerate() {
             if let Ok(text) = std::fs::read_to_string(&p) {
                 let f: File = toml::from_str(&text).ctx(format!("{}", p.display()))?;
+                if i == 1 && f.boot.is_some() {
+                    // a cloned repository must not hand its agents ring 0
+                    crate::bail!("{}: `boot` can only be set in {}", p.display(), crate::util::config_dir().join("config.toml").display());
+                }
                 c.merge(f).ctx(format!("{}", p.display()))?;
             }
         }
@@ -161,6 +171,9 @@ impl Config {
         }
         if let Some(c) = f.cache {
             self.cache = c;
+        }
+        if let Some(b) = f.boot {
+            self.boot = b;
         }
         if let Some(a) = f.agent {
             let names: Vec<&str> = crate::agent::PROFILES.iter().map(|p| p.name).collect();

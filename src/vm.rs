@@ -465,6 +465,23 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         log: Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(s.path("net.log")).ok()),
     });
     crate::proxy::serve(proxy_l, proxy);
+    // test kernels (acrboot), only when the user turned it on
+    let test_vm = Arc::new(crate::acrboot::TestVm::default());
+    if cfg.boot {
+        let p = rundir.join(format!("v.sock_{}", crate::acrboot::PORT_BOOT));
+        let _ = std::fs::remove_file(&p);
+        let l = UnixListener::bind(&p).ctx("bind boot socket")?;
+        crate::acrboot::serve(
+            l,
+            crate::acrboot::Server {
+                dir: s.path("boots"),
+                log: s.path("boot.log"),
+                max_cpus: s.meta.vcpus,
+                max_mem_mib: s.meta.mem_mib,
+                vm: test_vm.clone(),
+            },
+        );
+    }
 
     let mut args = String::from(
         "console=ttyS0 reboot=k panic=1 pci=off nomodule i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd \
@@ -591,6 +608,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         let _ = fc.kill();
         let _ = fc.wait();
     }
+    crate::acrboot::stop(&test_vm);
     let _ = std::fs::remove_dir_all(&rundir);
     s.meta.runtime += t0.elapsed().as_secs();
     s.meta.boots += 1;

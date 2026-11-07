@@ -22,6 +22,7 @@
 //! - `changes`: interpreting, reviewing and safely applying the guest's changes
 //! - `util`: errors, paths, hashing, locking and formatting helpers
 
+mod acrboot;
 mod activity;
 mod agent;
 mod buildcache;
@@ -48,8 +49,12 @@ fn main() {
     if std::process::id() == 1 {
         guest::main();
     }
-    util::mark("start");
     let args: Vec<String> = std::env::args().collect();
+    // inside a session, acinit is also the acrboot command
+    if args.first().is_some_and(|a| a.rsplit('/').next() == Some("acrboot")) {
+        std::process::exit(acrboot::client(&args[1..]));
+    }
+    util::mark("start");
     let code = match cli::run(args) {
         Ok(c) => c,
         Err(e) => {
