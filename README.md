@@ -44,7 +44,10 @@ The agent committed: main is now 3f2a9c1d07e4
 ```
 
 Nothing reaches your directory until you choose **apply** (now, or later
-with `agentcracker apply`).
+with `agentcracker apply`).  In a git repository, what git ignores - build
+output - is counted but left out of the list, the diff and apply (`[i]` in
+the menu, or `--ignored`, brings it in), so the agent can build and test
+without burying its edits under thousands of object files.
 
 Everything else is a subcommand:
 
@@ -53,8 +56,8 @@ agentcracker [--allow HOST]... [--no-net] [--console] [--detach] <command> [args
 agentcracker ls     [--json]         # sessions: age, status, changes, directory
 agentcracker show   [--json] [SESSION]   # changes, network log, Claude transcripts, disk use
 agentcracker log    [--json] [-f] [SESSION]   # network requests + the agent's tool calls
-agentcracker diff   [SESSION]
-agentcracker apply  [SESSION]
+agentcracker diff   [--ignored] [SESSION]   # --ignored: include what git ignores
+agentcracker apply  [--ignored] [SESSION]
 agentcracker branch [SESSION]        # agent's commits -> branch agentcracker/<id>
 agentcracker resume [SESSION] [command...]
 agentcracker shell  [SESSION]        # also opens a shell inside a *running* session
@@ -603,6 +606,13 @@ the paranoia goes:
   another name.  By default `.git/` internals are excluded from apply
   entirely; only working-tree changes (and, with `--branch`, the
   agent's commits) come across.
+- **Leave build output out.**  Changes git ignores are counted but not
+  listed or applied unless asked for (`--ignored`).  The rules are the
+  host's (`git check-ignore` in the project), not the guest's copies of
+  the ignore files, so an agent cannot hide a change by editing
+  `.gitignore`; tracked files are never ignored; and a project that an
+  enclosing repository ignores (a home directory under git) gets no
+  filtering at all.
 
 ## Host-side hardening
 
@@ -958,7 +968,10 @@ from `home = [...]` and `state = [...]` in the config.
 
 **Apply.**  Implemented as described: confined `openat2` writes, temp file
 plus rename, setuid/setgid dropped, `.git/` internals never written,
-sensitive files flagged.  Nothing the guest controls reaches the terminal
+sensitive files flagged, ignored files left out.  The ignore check is one
+`git check-ignore --stdin` over every changed path (directories with a
+trailing `/`); paths beneath a symlink on the host, which make git abort,
+are never ignored.  Nothing the guest controls reaches the terminal
 raw: file names, symlink targets, diff content (on a terminal), branch and
 host names and transcript text are printed with control and
 bidi-override characters escaped, so a diff under review cannot hide

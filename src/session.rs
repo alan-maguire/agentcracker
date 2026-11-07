@@ -39,6 +39,10 @@ pub struct Summary {
     pub deleted: usize,
     /// Entries changed inside `.git/` (never applied; see `agentcracker branch`).
     pub git_internal: usize,
+    /// Changes git on the host ignores (build output), not counted above
+    /// and not applied by default.
+    #[serde(default)]
+    pub ignored: usize,
 }
 
 /// Everything recorded about a session, persisted as `meta.json`.

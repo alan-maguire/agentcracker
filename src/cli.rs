@@ -48,8 +48,9 @@ usage:
         run <command> in a new session for the current directory
   agentcracker ls     [--json]          list sessions
   agentcracker show   [--json] [SESSION]   details: changes, network, agent transcripts
-  agentcracker diff   [SESSION]         show the session's changes
-  agentcracker apply  [SESSION]         write the changes into the real directory
+  agentcracker diff   [--ignored] [SESSION]   show the session's changes
+  agentcracker apply  [--ignored] [SESSION]   write them into the real directory
+                                        (--ignored: also what git ignores)
   agentcracker branch [SESSION]         turn the agent's git commits into a host branch
   agentcracker resume [SESSION] [command...]   boot again on the same overlay
   agentcracker shell  [SESSION]         open a shell inside the session (also while it runs)
@@ -168,8 +169,8 @@ pub fn run(args: Vec<String>) -> Result<i32> {
         "wait" => cmd_wait(rest),
         "log" => cmd_log(rest),
         "stop" => cmd_stop(rest),
-        "diff" => cmd_diff(rest.first().map(|s| s.as_str())),
-        "apply" => cmd_apply(rest.first().map(|s| s.as_str())),
+        "diff" => cmd_diff(rest),
+        "apply" => cmd_apply(rest),
         "branch" => cmd_branch(rest.first().map(|s| s.as_str())),
         "resume" => cmd_resume(rest, false),
         "shell" => cmd_resume(rest, true),
@@ -436,8 +437,13 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
 /// an error if loading the changes, applying or booting fails.
 fn review(s: &mut Session, cfg: &Config) -> Result<()> {
     let dim = |t: &str| format!("\x1b[2m{t}\x1b[0m");
+    let mut with_ignored = false;
     loop {
-        let cs = ChangeSet::load(s)?;
+        let mut cs = ChangeSet::load(s)?;
+        if let Some(c) = &mut cs {
+            c.include_ignored = with_ignored;
+        }
+        let ignored = cs.as_ref().map_or(0, |c| c.ignored_count());
         let has_changes = cs.as_ref().is_some_and(|c| !c.is_empty());
         let head = cs.as_ref().and_then(|c| changes::agent_head(c, s.meta.git_head.as_deref()));
         eprintln!();
@@ -450,6 +456,11 @@ fn review(s: &mut Session, cfg: &Config) -> Result<()> {
                 }
             } else {
                 eprintln!("No changes to {}.", tilde(&s.meta.cwd));
+            }
+            if ignored > 0 && with_ignored {
+                eprintln!("{}", dim(&format!("including {ignored} file(s) git ignores; [i] to leave them out")));
+            } else if ignored > 0 {
+                eprintln!("{}", dim(&format!("{ignored} more file(s) git ignores (build output) are hidden and not applied; [i] to include them")));
             }
             if let Some((sha, name)) = &head {
                 eprintln!("The agent committed: {} is now {}", crate::util::safe_text(name.as_bytes(), false), crate::util::safe_text(sha.get(..12).unwrap_or(sha).as_bytes(), false));
@@ -465,10 +476,14 @@ fn review(s: &mut Session, cfg: &Config) -> Result<()> {
         if head.is_some() {
             opts.push("[b]ranch");
         }
+        if ignored > 0 {
+            opts.push("[i]gnored");
+        }
         opts.extend(["[s]hell", "[K]eep for later (not applied)", "[x] discard"]);
-        let valid = format!("{}{}{}skx\n", if has_changes { "da" } else { "" }, if head.is_some() { "b" } else { "" }, "");
+        let valid = format!("{}{}{}skx\n", if has_changes { "da" } else { "" }, if head.is_some() { "b" } else { "" }, if ignored > 0 { "i" } else { "" });
         let Some(k) = prompt_key(&format!("{} ", opts.join(" ")), &valid) else { return Ok(()) };
         match k {
+            'i' => with_ignored = !with_ignored,
             'd' => {
                 if let Some(cs) = &cs {
                     changes::show_diff(cs, &s.path("tmp"))?;
@@ -849,40 +864,74 @@ fn load_cs(s: &Session) -> Result<ChangeSet> {
     ChangeSet::load(s)?.ctx(format!("session {} has no change record (resume it and exit cleanly)", s.meta.id))
 }
 
-/// `agentcracker diff [SESSION]`: show the session's changes as a diff (see
-/// [`changes::show_diff`]), or say there are none.  `arg`: optional session
-/// id prefix.  Returns 0.
-fn cmd_diff(arg: Option<&str>) -> Result<i32> {
+/// Split `--ignored` off the arguments of `diff` and `apply`.  Returns
+/// whether it was given and the session id prefix, if any.
+fn ignored_arg(args: &[String]) -> Result<(bool, Option<&str>)> {
+    let mut ig = false;
+    let mut id = None;
+    for a in args {
+        match a.as_str() {
+            "--ignored" => ig = true,
+            o if o.starts_with('-') => crate::bail!("unknown option {o}"),
+            o if id.is_none() => id = Some(o),
+            o => crate::bail!("unexpected argument {o}"),
+        }
+    }
+    Ok((ig, id))
+}
+
+/// Say how many ignored changes `cs` leaves out, if any, and how to get them.
+fn ignored_note(cs: &ChangeSet, cmd: &str) {
+    let n = cs.ignored_count();
+    if n > 0 && !cs.include_ignored {
+        eprintln!("({n} more file(s) git ignores are left out; agentcracker {cmd} --ignored includes them)");
+    }
+}
+
+/// `agentcracker diff [--ignored] [SESSION]`: show the session's changes as
+/// a diff (see [`changes::show_diff`]), or say there are none.  `args`:
+/// `--ignored` (include changes git ignores) and an optional session id
+/// prefix.  Returns 0.
+fn cmd_diff(args: &[String]) -> Result<i32> {
+    let (ig, arg) = ignored_arg(args)?;
     let s = session::find(arg, &cwd()?)?;
-    let cs = load_cs(&s)?;
+    let mut cs = load_cs(&s)?;
+    cs.include_ignored = ig;
     if cs.is_empty() {
         eprintln!("no changes");
+        ignored_note(&cs, "diff");
         if !cs.git.is_empty() {
             eprintln!("({} changes inside .git/; see `agentcracker branch`)", cs.git.len());
         }
         return Ok(0);
     }
+    ignored_note(&cs, "diff");
     changes::show_diff(&cs, &s.path("tmp"))?;
     Ok(0)
 }
 
-/// `agentcracker apply [SESSION]`: list the session's changes and apply
-/// them to the project directory (see [`apply_interactive`]), asking first
-/// if they were applied before.  Refuses while the session is running.
+/// `agentcracker apply [--ignored] [SESSION]`: list the session's changes
+/// and apply them to the project directory (see [`apply_interactive`]),
+/// asking first if they were applied before.  Refuses while the session is
+/// running.
 ///
-/// `arg`: optional session id prefix.  Returns 0, or 1 if the user declined
-/// to apply again.
-fn cmd_apply(arg: Option<&str>) -> Result<i32> {
+/// `args`: `--ignored` (apply changes git ignores too) and an optional
+/// session id prefix.  Returns 0, or 1 if the user declined to apply again.
+fn cmd_apply(args: &[String]) -> Result<i32> {
+    let (ig, arg) = ignored_arg(args)?;
     let mut s = session::find(arg, &cwd()?)?;
     if s.is_running() {
         crate::bail!("session {} is still running", s.meta.id);
     }
-    let cs = load_cs(&s)?;
+    let mut cs = load_cs(&s)?;
+    cs.include_ignored = ig;
     if cs.is_empty() {
         eprintln!("no changes to apply");
+        ignored_note(&cs, "apply");
         return Ok(0);
     }
     changes::print_list(&cs, 30);
+    ignored_note(&cs, "apply");
     if cs.all_in_place() {
         eprintln!("all of these are already on the host; nothing to do");
         return Ok(0);
@@ -991,7 +1040,7 @@ fn session_brief(s: &Session) -> serde_json::Value {
         "created": m.created,
         "ended": m.ended,
         "changes": m.summary.as_ref().map(|x| serde_json::json!({
-            "added": x.added, "modified": x.modified, "deleted": x.deleted, "inside_git": x.git_internal,
+            "added": x.added, "modified": x.modified, "deleted": x.deleted, "inside_git": x.git_internal, "ignored": x.ignored,
         })),
     })
 }

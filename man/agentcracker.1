@@ -31,9 +31,11 @@ agentcracker, acr \- run coding agents in disposable Firecracker microVMs
 .RI [ session ]
 .br
 .B agentcracker diff
+.RB [ \-\-ignored ]
 .RI [ session ]
 .br
 .B agentcracker apply
+.RB [ \-\-ignored ]
 .RI [ session ]
 .br
 .B agentcracker branch
@@ -181,16 +183,22 @@ are copied out.  With
 .BR \-\-json ,
 one object per event.  All text is the agent's and is shown escaped.
 .TP
-.BR diff " [\fIsession\fR]"
+.BR diff " [\fB\-\-ignored\fR] [\fIsession\fR]"
 Show the session's changes as a unified diff against the current host
 files, through
 .B $PAGER
 on a terminal.  Changes to files that were also changed on the host are
 marked
 .BR CONFLICT .
+Changes git ignores are left out unless
+.B \-\-ignored
+is given (see
+.BR "APPLYING CHANGES" ).
 .TP
-.BR apply " [\fIsession\fR]"
-Write the session's changes into its directory on the host.  If the host
+.BR apply " [\fB\-\-ignored\fR] [\fIsession\fR]"
+Write the session's changes into its directory on the host; with
+.BR \-\-ignored ,
+those git ignores too.  If the host
 changed any of the same files since the session started, apply asks
 whether to skip those, overwrite them or cancel; without a terminal it
 refuses and changes nothing.  Changes the host already has are skipped,
@@ -319,6 +327,10 @@ any), then ask whether to keep the session.
 .B b
 branch: import the agent's git commits (offered only if it made some).
 .TP
+.B i
+ignored: include the changes git ignores in the list, the diff and apply,
+or leave them out again (offered only if there are some).
+.TP
 .B s
 shell: open a shell inside the session; exiting it returns to the menu.
 .TP
@@ -355,6 +367,26 @@ and files that
 .B "run or configure tools on the host"
 (Makefile, package.json, .envrc, .github/, newly executable files, ...),
 which deserve review before applying.
+.PP
+In a git work tree, changes git ignores \(em build output such as
+.IR *.o ,
+.I *.ko
+and
+.IR build/ ,
+by the project's
+.I .gitignore
+files \(em are left out: not listed, not in the diff and not applied,
+only counted
+.RI ( "+1624 ignored by git" ).
+So a session that built the project reviews like one that did not.  The
+rules are git's own, as they are on the host
+.RB ( "git check-ignore" ):
+the agent's edits to ignore files hide nothing, and tracked files are
+never ignored.  If git ignores the project directory itself (it is inside
+another repository that ignores it), nothing is.  Include them with
+.B i
+in the review menu, or
+.BR "diff \-\-ignored" " and " "apply \-\-ignored" .
 .PP
 Apply writes each file to a temporary name and renames it into place,
 never follows symlinks out of the project directory, drops setuid and
@@ -397,7 +429,9 @@ and
 .RB ( added ,
 .BR modified ,
 .BR deleted ,
-.BR inside_git ;
+.BR inside_git ,
+.B ignored
+(changes git ignores, not in the other counts);
 null before the first export).
 .PP
 .B show

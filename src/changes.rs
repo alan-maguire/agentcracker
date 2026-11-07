@@ -14,7 +14,11 @@
 //!   files, CI config, editor settings, dotfiles, newly executable files):
 //!   such changes are highlighted for review;
 //! - `.git/` entries are set aside: they are never applied, but the agent's
-//!   commits can be imported as a branch ([`import_branch`]).
+//!   commits can be imported as a branch ([`import_branch`]);
+//! - `ignored` if git on the host would ignore the path (build output, by
+//!   the project's `.gitignore` as it is on the host - the agent's edits to
+//!   ignore files don't count): hidden from the review and not applied,
+//!   unless the user asks for them ([`ChangeSet::include_ignored`]).
 //!
 //! File contents are never copied out of the stream: a [`Change`] records
 //! where its data is in `changes.stream`, and readers seek there.
@@ -100,12 +104,19 @@ pub struct Change {
     /// the host already looks like the result (applied before, or the same
     /// edit made by hand): never a conflict, and apply leaves it alone
     pub in_place: bool,
+    /// git on the host ignores the path (see [`ignored_by_git`]): hidden and
+    /// not applied unless [`ChangeSet::include_ignored`] is set.
+    pub ignored: bool,
 }
 
 impl Change {
     /// Returns the change's path, relative to the project root.
     pub fn path(&self) -> &Path {
         Path::new(OsStr::from_bytes(&self.raw))
+    }
+    /// Returns true if the change is a deletion.
+    fn op_is_delete(&self) -> bool {
+        matches!(self.op, Op::Delete)
     }
     /// Returns true if the change is shown and counted, i.e. it is not a
     /// [`St::Container`].
@@ -125,6 +136,8 @@ pub struct ChangeSet {
     pub git: Vec<(Vec<u8>, Op)>,
     /// The project directory on the host that the changes apply to.
     pub cwd: PathBuf,
+    /// Show, count and apply ignored changes too (`--ignored`).
+    pub include_ignored: bool,
 }
 
 /// Returns true if path `p` (relative to the project root) names a file the
@@ -215,6 +228,99 @@ fn hooks_path_in(cwd: &Path) -> Option<Vec<u8>> {
         v.push(b'/');
     }
     Some(v)
+}
+
+/// Which of `changes` git on the host ignores, in the same order.
+///
+/// Asks `git check-ignore` in `cwd`, so the rules are git's own: the
+/// project's `.gitignore` files as they are on the host, `.git/info/exclude`
+/// and the user's global excludes; tracked files are never ignored.  The
+/// guest's copies of ignore files play no part, so an agent cannot hide its
+/// changes by editing them.  Directories are asked about with a trailing `/`
+/// (as patterns like `build/` need).  Paths git would refuse - unsafe ones,
+/// or ones beneath a symlink on the host, which make it abort - are never
+/// ignored.  Outside a git work tree, or if git fails, nothing is - nor
+/// when git ignores the project directory itself: its rules are then about
+/// an enclosing repository (a home directory under git with `*` ignored),
+/// not the project.
+fn ignored_by_git(cwd: &Path, changes: &[Change]) -> Vec<bool> {
+    let mut out = vec![false; changes.len()];
+    let project_ignored = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["check-ignore", "-q", "./"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|st| st.success());
+    if project_ignored {
+        return out;
+    }
+    let mut symlinked: HashMap<Vec<u8>, bool> = HashMap::new();
+    let mut beneath_symlink = |raw: &[u8]| -> bool {
+        let Some(slash) = raw.iter().rposition(|&b| b == b'/') else { return false };
+        let parent = &raw[..slash];
+        if let Some(&v) = symlinked.get(parent) {
+            return v;
+        }
+        let mut p = cwd.to_path_buf();
+        let mut v = false;
+        for part in parent.split(|&b| b == b'/') {
+            p.push(OsStr::from_bytes(part));
+            match p.symlink_metadata() {
+                Ok(md) if md.file_type().is_symlink() => {
+                    v = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        symlinked.insert(parent.to_vec(), v);
+        v
+    };
+    let mut input = Vec::new();
+    let mut asked: HashMap<Vec<u8>, usize> = HashMap::new();
+    for (i, c) in changes.iter().enumerate() {
+        if c.st == St::Container || safe_rel_path(&c.raw).is_none() || beneath_symlink(&c.raw) {
+            continue;
+        }
+        let mut q = c.raw.clone();
+        if matches!(c.op, Op::Dir { .. }) || (c.op_is_delete() && c.nested > 0) {
+            q.push(b'/');
+        }
+        input.extend_from_slice(&q);
+        input.push(0);
+        asked.insert(q, i);
+    }
+    if asked.is_empty() {
+        return out;
+    }
+    let child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["check-ignore", "-z", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return out };
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let Ok(o) = child.wait_with_output() else { return out };
+    let _ = writer.join();
+    // 0: some are ignored, 1: none are; anything else is an error
+    if o.status.code() != Some(0) {
+        return out;
+    }
+    for p in o.stdout.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        if let Some(&i) = asked.get(p) {
+            out[i] = true;
+        }
+    }
+    out
 }
 
 /// The conflict test: returns true if the host entry for manifest entry
@@ -345,7 +451,7 @@ impl ChangeSet {
             let sensitive = is_sensitive(&raw)
                 || hooks.as_ref().is_some_and(|h| raw.starts_with(h))
                 || matches!(&op, Op::Symlink { target } if symlink_escapes(&raw, target));
-            let mut c = Change { raw: raw.clone(), op: op.clone(), st: St::Added, conflict: false, sensitive, mode_only: false, nested: 0, in_place: false };
+            let mut c = Change { raw: raw.clone(), op: op.clone(), st: St::Added, conflict: false, sensitive, mode_only: false, nested: 0, in_place: false, ignored: false };
             match (&op, m) {
                 (Op::File { mode, off, size }, Some(m)) => {
                     let was_file = m.mode & libc::S_IFMT == libc::S_IFREG;
@@ -408,6 +514,7 @@ impl ChangeSet {
                                 mode_only: false,
                                 nested,
                                 in_place: false,
+                                ignored: false,
                             });
                         }
                     }
@@ -436,15 +543,43 @@ impl ChangeSet {
                 c.conflict = false;
             }
         }
-        Ok(ChangeSet { stream: stream.to_path_buf(), changes, git, cwd: cwd.to_path_buf() })
+        let ignored = ignored_by_git(cwd, &changes);
+        for (c, ig) in changes.iter_mut().zip(ignored) {
+            c.ignored = ig;
+        }
+        // a new directory is ignored when everything in it is
+        for i in (0..changes.len()).rev() {
+            let c = &changes[i];
+            if c.ignored || c.st != St::Added || !matches!(c.op, Op::Dir { .. }) {
+                continue;
+            }
+            let dir = &c.raw;
+            let mut kids = changes.iter().filter(|k| under(&k.raw, dir)).peekable();
+            if kids.peek().is_some() && kids.all(|k| k.ignored) {
+                changes[i].ignored = true;
+            }
+        }
+        Ok(ChangeSet { stream: stream.to_path_buf(), changes, git, cwd: cwd.to_path_buf(), include_ignored: false })
+    }
+
+    /// Returns true if change `c` is part of the review: not ignored, or
+    /// ignored changes were asked for.
+    fn wanted(&self, c: &Change) -> bool {
+        self.include_ignored || !c.ignored
+    }
+
+    /// Returns the number of changes git ignores, counted like
+    /// [`ChangeSet::summary`] (new directories are not counted).
+    pub fn ignored_count(&self) -> usize {
+        self.changes.iter().filter(|c| c.ignored && c.shown() && !matches!((c.st, &c.op), (St::Added, Op::Dir { .. }))).count()
     }
 
     /// Count the changes for display and for `meta.json`: added files and
     /// symlinks (new directories are not counted), modified and deleted
     /// entries, and `.git/` entries.  Returns the counts.
     pub fn summary(&self) -> Summary {
-        let mut s = Summary { git_internal: self.git.len(), ..Default::default() };
-        for c in &self.changes {
+        let mut s = Summary { git_internal: self.git.len(), ignored: if self.include_ignored { 0 } else { self.ignored_count() }, ..Default::default() };
+        for c in self.changes.iter().filter(|c| self.wanted(c)) {
             let is_dir = matches!(c.op, Op::Dir { .. });
             match c.st {
                 St::Added if !is_dir => s.added += 1,
@@ -460,12 +595,12 @@ impl ChangeSet {
     /// without added directories that contain added content (which implies
     /// them).  Empty new directories are shown.
     pub fn shown(&self) -> impl Iterator<Item = &Change> {
-        self.changes.iter().filter(|c| c.shown() && !(c.st == St::Added && matches!(c.op, Op::Dir { .. }) && self.has_children(&c.raw)))
+        self.changes.iter().filter(|c| c.shown() && self.wanted(c) && !(c.st == St::Added && matches!(c.op, Op::Dir { .. }) && self.has_children(&c.raw)))
     }
 
     /// Returns true if some change lies strictly beneath directory `dir`.
     fn has_children(&self, dir: &[u8]) -> bool {
-        self.changes.iter().any(|c| c.raw.len() > dir.len() && c.raw.starts_with(dir) && c.raw[dir.len()] == b'/')
+        self.changes.iter().any(|c| self.wanted(c) && c.raw.len() > dir.len() && c.raw.starts_with(dir) && c.raw[dir.len()] == b'/')
     }
 
     /// Returns true if there is nothing to show; `.git/` changes do not count.
@@ -482,7 +617,7 @@ impl ChangeSet {
     /// Returns the shown changes whose host copy changed since the session
     /// started.
     pub fn conflicts(&self) -> Vec<&Change> {
-        self.changes.iter().filter(|c| c.conflict && c.shown()).collect()
+        self.shown().filter(|c| c.conflict).collect()
     }
 }
 
@@ -491,12 +626,13 @@ impl ChangeSet {
 // ---------------------------------------------------------------------------
 
 /// Describe `s` in one line for the review, e.g.
-/// `3 files changed: 1 modified, 2 added`, or `no changes`.  `.git/`
-/// entries are not included.
+/// `3 files changed: 1 modified, 2 added`, or `no changes`, then how many
+/// changes git ignores, if any.  `.git/` entries are not included.
 pub fn summary_line(s: &Summary) -> String {
     let n = s.added + s.modified + s.deleted;
+    let ig = if s.ignored > 0 { format!(" (+{} ignored by git)", s.ignored) } else { String::new() };
     if n == 0 {
-        return "no changes".into();
+        return format!("no changes{ig}");
     }
     let mut parts = vec![];
     if s.modified > 0 {
@@ -508,7 +644,7 @@ pub fn summary_line(s: &Summary) -> String {
     if s.deleted > 0 {
         parts.push(format!("{} deleted", s.deleted));
     }
-    format!("{n} file{} changed: {}", if n == 1 { "" } else { "s" }, parts.join(", "))
+    format!("{n} file{} changed: {}{ig}", if n == 1 { "" } else { "s" }, parts.join(", "))
 }
 
 /// Describe `s` compactly for `agentcracker ls`: `+added ~modified -deleted`,
@@ -1002,7 +1138,8 @@ pub struct Applied {
 ///
 /// Deletions run first, then everything else in stream order (parents
 /// before children).  Conflicting changes are skipped, and listed, unless
-/// `include_conflicts`; `.git/` changes are never applied.  A failure on
+/// `include_conflicts`; ignored ones are left out unless
+/// [`ChangeSet::include_ignored`]; `.git/` changes are never applied.  A failure on
 /// one path is recorded in [`Applied::errors`] and does not stop the rest.
 ///
 /// `cs`: the change set; `tag`: used in temporary file names (the session
@@ -1018,7 +1155,7 @@ pub fn apply(cs: &ChangeSet, tag: &str, include_conflicts: bool) -> Result<Appli
     let skip = |c: &Change| c.conflict && !include_conflicts;
     let mut in_place = 0;
     // deletions first, then creations in stream (parent-first) order
-    for c in cs.changes.iter().filter(|c| c.st == St::Deleted) {
+    for c in cs.changes.iter().filter(|c| c.st == St::Deleted && cs.wanted(c)) {
         if c.in_place {
             in_place += 1;
             continue;
@@ -1032,7 +1169,7 @@ pub fn apply(cs: &ChangeSet, tag: &str, include_conflicts: bool) -> Result<Appli
             Err(e) => res.errors.push(format!("{}: {e}", crate::util::safe_path(c.path()))),
         }
     }
-    for c in cs.changes.iter().filter(|c| c.st != St::Deleted) {
+    for c in cs.changes.iter().filter(|c| c.st != St::Deleted && cs.wanted(c)) {
         if safe_rel_path(&c.raw).is_none() {
             res.errors.push(format!("{}: unsafe path", crate::util::safe_path(c.path())));
             continue;
