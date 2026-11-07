@@ -154,7 +154,7 @@ Non-goals:
   |  - builds/caches /usr + toolchain snapshots       - assembles / from base + /usr
   |  - builds/caches lower layer for $PWD             - assembles overlay at $PWD
   |  - creates sparse scratch disk                    - starts vsock services
-  |  - launches firecracker (via jailer)              - runs `claude` in a pty
+  |  - launches firecracker (as the user)             - runs `claude` in a pty
   |  - attaches terminal over vsock                   - on exit: sync, report, poweroff
   |  - runs egress proxy on vsock
   |  - on exit: diff / apply / keep / discard
@@ -172,8 +172,8 @@ Five pieces:
 
 1. **The `agentcracker` CLI** on the host - orchestration, terminal
    attach, review and apply.
-2. **Firecracker + jailer** - the VMM, running unprivileged in a
-   chroot with seccomp and a cgroup.
+2. **Firecracker** - the VMM, run directly (no jailer) as the invoking
+   user, under a seccomp filter.
 3. **A guest kernel, a tiny base rootfs, and a read-only snapshot of
    the host's `/usr`** - shared between sessions, cached, rebuilt
    only when the host's packages change.
@@ -533,7 +533,7 @@ agentcracker claude
    +- reuse usr.img / tools.img           (rebuild in background if stale)
    +- build or reuse lower.img for $PWD      (record base manifest)
    +- create scratch.img
-   +- jailer -> firecracker (base, usr, tools, lower, scratch, vsock)
+   +- firecracker (base, usr, tools, lower, scratch, vsock)
    +- attach terminal ... agent runs ...
    +- guest powers off
    |
@@ -606,16 +606,20 @@ the paranoia goes:
 
 ## Host-side hardening
 
-- Firecracker runs under **jailer**: its own chroot containing only the
-  images and sockets for this session, a dedicated cgroup (CPU, memory,
-  pids limits), a seccomp filter, and new namespaces.
+- Firecracker runs **without the jailer**, which needs root: it is an
+  ordinary process of the invoking user, confined by its seccomp filter
+  (a per-thread syscall allowlist) and nothing else.  There is no chroot,
+  cgroup or namespace around it, so a guest that escaped into the VMM
+  would have that user's access to the host.  Wrapping it in a user
+  namespace or Landlock is a possible future step.
 - No TAP device, no bridge, no iptables - so no root.  `/dev/kvm`
   access is the only requirement.
-- The host-side services the guest can reach are: the terminal stream,
-  the control channel, a CONNECT proxy with an allowlist, and
-  (optionally) a read-only 9P server.  That is the entire attack
-  surface beyond KVM and Firecracker's virtio devices, and each piece
-  is small enough to audit.
+- The host-side services the guest can reach are: the control
+  connection (which carries the terminal stream), and a CONNECT proxy
+  with an allowlist.  (`agentcracker shell` also connects to a server in
+  the guest, but that connection is opened by the host.)  That is the
+  entire attack surface beyond KVM and Firecracker's virtio devices,
+  and each piece is small enough to audit.
 
 ## Performance
 
