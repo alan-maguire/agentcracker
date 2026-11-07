@@ -65,6 +65,7 @@ agentcracker wait   [--json] [SESSION...]   # for --detach'ed sessions
 agentcracker stop   [SESSION...]     # end running sessions, keeping their changes
 agentcracker rm     SESSION...
 agentcracker refresh                 # rebuild /usr + toolchain snapshots now
+agentcracker cache  [--drop [DIR]]   # per-project build caches (the guest's ~/.cache)
 ```
 
 `SESSION` is an id prefix and defaults to the latest session for the
@@ -259,6 +260,34 @@ Because it is a plain file on the host, keeping a session is free and
 discarding one is `rm`.  Resuming a session means booting again with
 the same scratch disk and lower image.
 
+### The build cache
+
+The scratch disk starts empty, so every session would build the project
+from cold.  Each project directory therefore also gets one persistent
+disk, its **build cache**, mounted as the guest's `~/.cache` in every
+session of that project.  That is where ccache, sccache, Go's build cache
+and pip already keep theirs, so they become incremental across sessions
+with no setup.  An out-of-tree build can go there too:
+
+```
+make O=~/.cache/kbuild -j$(nproc)    # a kernel: tinyconfig vmlinux, 50s -> 4s next session
+```
+
+(an `O=` kernel build needs a clean source tree; with in-tree build
+output, use ccache: `make CC="ccache gcc"`).
+
+- **Per project, one at a time.**  The cache is keyed on the project
+  directory and locked by the session using it; a concurrent session of
+  the same project gets an empty `~/.cache` of its own (and says so).
+- **Never on the host.**  The host creates, attaches and deletes the
+  image (a sparse ext4 file under
+  `~/.local/state/agentcracker/caches/`) but never mounts it.  What an
+  agent leaves there can only mislead later sessions of the same
+  project, not the host; `agentcracker cache --drop` starts it afresh.
+- **Visible.**  `agentcracker cache` lists every project's cache with its
+  size and last use; `show` reports the session's.  `cache = false` in
+  the config turns it off.
+
 ## Kernel and root filesystem: the host's own userspace
 
 The usual way to give a sandbox tools is an image: a Dockerfile, an
@@ -330,6 +359,7 @@ The config file can add or remove directories explicitly:
 # .agentcracker.toml  (or ~/.config/agentcracker/config.toml)
 vcpus   = 8
 memory  = "8G"
+cache   = true            # the project's persistent ~/.cache (default)
 exclude = ["build/", "*.o"]
 allow   = ["api.anthropic.com", "github.com", "pypi.org"]
 tools   = ["~/.rustup", "~/.cargo", "/opt/llvm-19"]

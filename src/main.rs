@@ -24,6 +24,7 @@
 
 mod activity;
 mod agent;
+mod buildcache;
 mod changes;
 mod cli;
 mod config;

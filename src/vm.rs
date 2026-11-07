@@ -486,6 +486,28 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
     if let Some(d) = &lower_delta {
         drives.push(drive("lowerdelta", d, false, true)); // /dev/vdf
     }
+    // the project's build cache, held (locked) until the VM is gone
+    let cache = if cfg.cache {
+        match crate::buildcache::attach(&s.meta.cwd) {
+            Ok(Some(c)) => Some(c),
+            Ok(None) => {
+                eprintln!("agentcracker: another session is using this directory's build cache; this one gets an empty ~/.cache");
+                None
+            }
+            Err(e) => {
+                eprintln!("agentcracker: no build cache: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let dev_cache = cache.as_ref().map(|c| {
+        // drives appear as vda, vdb, ... in the order given
+        let dev = format!("/dev/vd{}", (b'a' + drives.len() as u8) as char);
+        drives.push(drive("cache", &c.image, false, false));
+        dev
+    });
     let fc_cfg = serde_json::json!({
         "boot-source": {"kernel_image_path": vmlinux, "boot_args": args},
         "drives": drives,
@@ -521,6 +543,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         dev_lower: "/dev/vdd".into(),
         dev_scratch: "/dev/vde".into(),
         dev_lower_delta: lower_delta.as_ref().map(|_| "/dev/vdf".into()),
+        dev_cache,
     };
     let seed = build_seed(&s.meta.cwd, cfg, first_boot, profile)?;
     crate::util::mark("home seed built");

@@ -172,6 +172,10 @@ pub struct GuestConfig {
     /// above `dev_lower`).
     #[serde(default)]
     pub dev_lower_delta: Option<String>,
+    /// Guest block device of the project's build cache, mounted as
+    /// `$HOME/.cache`, if the session has it (see [`crate::buildcache`]).
+    #[serde(default)]
+    pub dev_cache: Option<String>,
 }
 
 /// Write one frame: type `t`, the length of `data` as a big-endian u32,

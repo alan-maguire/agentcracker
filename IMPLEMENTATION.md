@@ -40,7 +40,8 @@ cargo doc --document-private-items --open
    review / apply / branch
 
  block devices:  vda base.img (ro, root)   vdb usr.img (ro)   vdc tools.img (ro)
-                 vdd lower.img (ro)        vde scratch.img (rw, the only writable disk)
+                 vdd lower.img (ro)        vde scratch.img (rw)
+                 [vdf lower-delta.img (ro)]  [next: the project's cache.img (rw)]
 ```
 
 - **One binary, two roles.**  `agentcracker` is a single Rust crate.
@@ -56,8 +57,10 @@ cargo doc --document-private-items --open
   in `README.md`).  It has no modules and no initramfs.
 - **Images** are EROFS, written by agentcracker itself (`src/erofs.rs`),
   and cached under `~/.cache/agentcracker`.  The **scratch disk** is a
-  sparse ext4 file per session.  It is the only writable device, and the
-  host never mounts it.
+  sparse ext4 file per session.  The only other writable device is the
+  project's **build cache** (`src/buildcache.rs`), the guest's
+  `~/.cache`, kept across the project's sessions.  The host never mounts
+  either.
 - **The session store** (`~/.local/state/agentcracker/sessions/<id>/`)
   holds everything about a session between and after boots.
 
@@ -170,6 +173,9 @@ The kernel mounts `base.img` read-only as `/` and runs `/acinit`.
    Missing parent directories are created with the owners and modes the
    host reported (`mkdirs_mirror`), so paths like `/tmp/claude-1000`
    keep the right owner;
+   With a build cache, its disk is mounted at `/scratch/cache` and its
+   `home/` bind-mounted on `$HOME/.cache` (`mount_cache`; if it will not
+   mount, the session goes on without it);
 6. mounts proc, sysfs, cgroup2, `/dev` and a tmpfs `/run` inside the new
    root, and brings up loopback;
 7. receives the SEED frames into `/scratch/seed.stream` and unpacks them
@@ -319,6 +325,9 @@ $PREFIX/lib/agentcracker/{acinit,firecracker,vmlinux,seccomp.bpf}
   changes.stream  state.stream  state/  console.log  net.log  lock  tmp/
   [stdout  stderr]                    output of --detach'ed runs
 
+~/.local/state/agentcracker/caches/<key>/    build cache per project; key: FNV of the path
+  cache.img  dir  lock                ext4 image (the guest's ~/.cache), its project, flock()ed while used
+
 $XDG_RUNTIME_DIR/agentcracker/<id>/  (or /tmp/agentcracker-<uid>/<id>/)
   firecracker.json  v.sock  v.sock_1024  v.sock_1025     (only while booted)
 ```
@@ -399,7 +408,7 @@ reaches the host, and how each one is handled:
 
 | Channel | Guard |
 |---|---|
-| Block devices | Only `scratch.img` is writable, and the host never mounts or parses it. |
+| Block devices | Only `scratch.img` and the project's build cache `cache.img` are writable, and the host never mounts or parses either.  The cache's contents reach only later sessions of the same project, one at a time (flock), never the host. |
 | Control frames | Length-capped (16 MiB); unknown frame types ignored; the guest's config cannot be changed by the guest. |
 | `changes.stream` | Parsed with path validation; data read by offset; applied only on request, through `Confined` (`openat2` beneath the project, no symlinks, temporary file + rename, `mode & 0777`); `.git/` never written; conflicts skipped unless the user chooses to overwrite. |
 | Git objects | Only object files with validated names; imported via `git fetch` with `fsckObjects`; no guest hooks, config or refs used. |
@@ -435,6 +444,7 @@ All source is in `src/`.
 | `guest.rs` | acinit: mounts, overlays, seed, proxy relay, command, export, poweroff. |
 | `agent.rs` | Agent profiles (Claude Code, Codex): hosts, seeded files, login, state, environment. |
 | `activity.rs` | The `log` timeline: network log and transcript tool calls. |
+| `buildcache.rs` | Per-project build caches (the guest's `~/.cache`): attach with a lock, list, drop. |
 | `changes.rs` | Change classification, diff, confined apply, branch import, agent state. |
 | `util.rs` | Errors, hashing, paths, locks, glob/excludes, formatting, prompts. |
 
@@ -452,6 +462,14 @@ and `Profile::path` resolves a path in the agent's directory, honouring
 `vm::credential_path` and `vm::guest_env` take the profile;
 `changes::transcripts` reads Claude's or Codex's transcripts, and
 `activity::tool_events` both formats.
+
+### `buildcache.rs`
+
+`attach` takes a project's cache for one boot (creating `cache.img` with
+`images::create_disk` on first use) and returns it with its `flock`
+held, or `None` when another running session has it; `vm::boot` adds it
+as the last drive and passes its device as `GuestConfig::dev_cache`.
+`list` and `drop_cache` back `agentcracker cache`.
 
 ### `activity.rs`
 

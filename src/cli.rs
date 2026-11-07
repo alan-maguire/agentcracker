@@ -59,6 +59,8 @@ usage:
   agentcracker stop   [SESSION...]      end running sessions (changes are kept)
   agentcracker rm     SESSION...        discard sessions
   agentcracker refresh                  rebuild the /usr and toolchain snapshots now
+  agentcracker cache  [--drop [DIR]]    list build caches (each project's ~/.cache);
+                                        --drop deletes this directory's (or DIR's)
 
 SESSION is an id prefix; it defaults to the latest session for this directory.
 Use `agentcracker run <command>` for a command that collides with the above.
@@ -176,6 +178,7 @@ pub fn run(args: Vec<String>) -> Result<i32> {
         "shell" => cmd_resume(rest, true),
         "rm" | "discard" => cmd_rm(rest),
         "refresh" => cmd_refresh(rest),
+        "cache" => cmd_cache(rest),
         "run" => cmd_run(rest),
         "__seccomp-json" if rest.len() == 2 => {
             // build aid: adapt firecracker's musl seccomp policy to a glibc build
@@ -311,7 +314,7 @@ fn cmd_run(args: &[String]) -> Result<i32> {
             );
         }
         crate::util::mark("session files");
-        images::create_scratch(&s.path("scratch.img"), 64)?;
+        images::create_disk(&s.path("scratch.img"), 64, "acscratch")?;
         crate::util::mark("scratch disk");
         Ok(())
     })();
@@ -855,6 +858,11 @@ fn cmd_show(args: &[String]) -> Result<i32> {
         if shared > 0 { format!("{} (plus {} of project snapshot shared with the image cache)", human_bytes(own), human_bytes(shared)) } else { human_bytes(own) },
     );
     row("files", tilde(&s.dir));
+    let cache = crate::buildcache::dir_for(&m.cwd).join("cache.img");
+    if let Ok(md) = std::fs::metadata(&cache) {
+        use std::os::unix::fs::MetadataExt;
+        row("cache", format!("{} build cache for {}, shared by its sessions (agentcracker cache)", human_bytes(md.blocks() * 512), tilde(&m.cwd)));
+    }
     Ok(0)
 }
 
@@ -971,6 +979,42 @@ fn cmd_rm(args: &[String]) -> Result<i32> {
         out!("removed {id}");
     }
     Ok(0)
+}
+
+/// `agentcracker cache [--drop [DIR]]`: list every project's build cache
+/// (size, last use, directory), or delete the one for DIR (default: the
+/// current directory).  Returns 0, or 1 if there was no cache to drop.
+fn cmd_cache(args: &[String]) -> Result<i32> {
+    match args {
+        [] => {
+            let all = crate::buildcache::list();
+            if all.is_empty() {
+                eprintln!("no build caches yet (a session's ~/.cache becomes its directory's build cache)");
+                return Ok(0);
+            }
+            let now = now();
+            for i in all {
+                let used = i.used.map_or("-".into(), |t| format!("{} ago", crate::util::human_age(now.saturating_sub(t))));
+                let gone = if i.cwd.is_dir() { "" } else { "  (directory gone)" };
+                out!("{:>8}  {:>9}  {}{gone}", human_bytes(i.bytes), used, tilde(&i.cwd));
+            }
+            Ok(0)
+        }
+        [d] | [d, _] if d == "--drop" => {
+            let dir = match args.get(1) {
+                Some(p) => std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p)),
+                None => cwd()?,
+            };
+            if crate::buildcache::drop_cache(&dir)? {
+                status(&format!("dropped the build cache for {}", tilde(&dir)));
+                Ok(0)
+            } else {
+                eprintln!("agentcracker: {} has no build cache", tilde(&dir));
+                Ok(1)
+            }
+        }
+        _ => crate::bail!("usage: agentcracker cache [--drop [DIR]]"),
+    }
 }
 
 /// `agentcracker refresh [--background]`: rebuild the /usr snapshot now;

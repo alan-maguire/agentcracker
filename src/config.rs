@@ -5,7 +5,7 @@
 //! 1. `~/.config/agentcracker/config.toml` (respecting `$XDG_CONFIG_HOME`)
 //! 2. `.agentcracker.toml` in the project directory
 //!
-//! Scalars (`vcpus`, `memory`, `net`) in a later file override earlier
+//! Scalars (`vcpus`, `memory`, `net`, `agent`, `cache`) in a later file override earlier
 //! ones.  Lists (`allow`, `exclude`, `exclude_usr`, `tools`, `no_tools`,
 //! `home`, `state`, `env`) are appended, so a project can add to the user's
 //! settings but not take anything away.  Unknown keys are an error, so a
@@ -38,6 +38,7 @@ struct File {
     state: Option<Vec<String>>,
     env: Option<Vec<String>>,
     agent: Option<String>,
+    cache: Option<bool>,
 }
 
 /// The effective configuration: built-in defaults with both config files
@@ -76,6 +77,9 @@ pub struct Config {
     /// The agent profile for commands that are not recognisably an agent
     /// (a shell, `make`, ...); `None` means Claude Code.
     pub agent: Option<&'static crate::agent::Profile>,
+    /// Give sessions the project's persistent build cache as `~/.cache`
+    /// (see [`crate::buildcache`]).  Default: on.
+    pub cache: bool,
 }
 
 /// Always excluded from the /usr snapshot: useless in a guest (kernel
@@ -123,6 +127,7 @@ impl Config {
             state: vec![],
             env: vec![],
             agent: None,
+            cache: true,
         };
         for p in [crate::util::config_dir().join("config.toml"), cwd.join(".agentcracker.toml")] {
             if let Ok(text) = std::fs::read_to_string(&p) {
@@ -153,6 +158,9 @@ impl Config {
         }
         if let Some(n) = f.net {
             self.net = n;
+        }
+        if let Some(c) = f.cache {
+            self.cache = c;
         }
         if let Some(a) = f.agent {
             let names: Vec<&str> = crate::agent::PROFILES.iter().map(|p| p.name).collect();

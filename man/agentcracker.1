@@ -61,6 +61,10 @@ agentcracker, acr \- run coding agents in disposable Firecracker microVMs
 .br
 .B agentcracker refresh
 .RB [ \-\-background ]
+.br
+.B agentcracker cache
+.RB [ \-\-drop
+.RI [ dir ]]
 .SH DESCRIPTION
 .B acr
 is installed as a short alias for
@@ -163,7 +167,8 @@ a JSON array instead (see
 Everything recorded about a session: command, times, status and boot
 count, VM shape and network policy, the list of changes, each host it
 connected to or was refused (the agent chose those names: allow one only
-if the work really needs it), the agent's transcripts, and disk use.
+if the work really needs it), the agent's transcripts, disk use, and the size of
+the directory's build cache.
 .TP
 .BR log " [\fB\-\-json\fR] [\fB\-f\fR] [\fIsession\fR]"
 The session's activity as one timeline, in local time: every connection
@@ -263,6 +268,18 @@ they go stale (the toolchain snapshot before the next boot, the
 .I /usr
 snapshot in the background while the old one keeps being used), so this
 is rarely needed.
+.TP
+.BR cache " [\fB\-\-drop\fR [\fIdir\fR]]"
+List every project's build cache: its size, when a session last used it,
+and its directory.  With
+.BR \-\-drop ,
+delete the build cache of
+.I dir
+(default: the current directory), so its next session starts with an
+empty
+.IR ~/.cache ;
+a cache in use by a running session cannot be dropped.  See
+.BR "BUILD CACHE" .
 .SS Naming sessions
 A
 .I session
@@ -351,6 +368,26 @@ Nothing reaches the project directory unless
 (or the
 .B apply
 command) is chosen.
+.SH BUILD CACHE
+Each project directory has one persistent disk, mounted as
+.I ~/.cache
+in every session of that project, so build caches survive from one
+session to the next: ccache, sccache, Go's build cache and pip keep
+theirs there already, and an out-of-tree build can go there too
+.RB ( "make O=~/.cache/kbuild" ).
+It is not part of the project, so nothing in it is ever reviewed or
+applied.
+.PP
+One running session uses a project's cache at a time; another session
+of the same project meanwhile gets an empty
+.I ~/.cache
+of its own, and says so.  The host never mounts the cache: what an agent
+leaves in it can mislead later sessions of the same project, never the
+host.
+.B "agentcracker cache \-\-drop"
+starts it afresh, and
+.B cache = false
+in the configuration turns it off.
 .SH APPLYING CHANGES
 Each change is listed with a letter:
 .B A
@@ -652,6 +689,12 @@ saved into the session on every exit.
 Extra environment variables passed into the guest (terminal, locale,
 editor, pager and the agent profile's variables are passed by default).
 .TP
+.BR cache " = true|false"
+Give sessions the project's persistent build cache as
+.I ~/.cache
+(default: true; see
+.BR "BUILD CACHE" ).
+.TP
 .BR agent " = \(dq\fIname\fR\(dq"
 The agent profile
 .RB ( claude
@@ -722,6 +765,15 @@ and
 .I net.log
 and
 .IR console.log .
+.TP
+.I ~/.local/state/agentcracker/caches/KEY/
+One directory per project with a build cache:
+.I cache.img
+(the sparse ext4 disk mounted as the guest's
+.IR ~/.cache ),
+.I dir
+(the project directory) and
+.IR lock .
 .TP
 .I ~/.cache/agentcracker/
 Cached images:

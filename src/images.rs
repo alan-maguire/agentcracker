@@ -1004,7 +1004,8 @@ fn gc_lower(dir: &Path) {
     }
 }
 
-/// Create a fresh sparse ext4 scratch disk of `size_gib` GiB at `path`.
+/// Create a fresh sparse ext4 disk of `size_gib` GiB at `path`, labelled
+/// `label`: a session's scratch disk, or a project's build cache.
 ///
 /// It is formatted here with `mkfs.ext4` (no reserved blocks, lazy inode
 /// table and journal initialisation, no discard) so the guest never needs
@@ -1013,7 +1014,7 @@ fn gc_lower(dir: &Path) {
 ///
 /// Returns an error if `mkfs.ext4` cannot be run (e2fsprogs missing) or
 /// fails.
-pub fn create_scratch(path: &Path, size_gib: u64) -> Result<()> {
+pub fn create_disk(path: &Path, size_gib: u64, label: &str) -> Result<()> {
     // mkfs.ext4 lives in sbin, which is often not on an ordinary user's PATH
     // (Debian and Ubuntu); and some versions announce "Creating regular
     // file" on stdout even with -q, which must not mix with the command's
@@ -1026,7 +1027,7 @@ pub fn create_scratch(path: &Path, size_gib: u64) -> Result<()> {
         .find(|p| p.is_file())
         .unwrap_or_else(|| PathBuf::from("mkfs.ext4"));
     let out = std::process::Command::new(&mkfs)
-        .args(["-q", "-F", "-m", "0", "-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1", "-L", "acscratch"])
+        .args(["-q", "-F", "-m", "0", "-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1", "-L", label])
         .arg(path)
         .arg(format!("{size_gib}G"))
         .stdin(std::process::Stdio::null())

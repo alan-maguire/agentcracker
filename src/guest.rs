@@ -865,6 +865,13 @@ fn run() -> Result<()> {
         let c = cstr(home.as_os_str());
         unsafe { libc::chown(c.as_ptr(), cfg.uid, cfg.gid) };
     }
+    if let Some(dev) = &cfg.dev_cache {
+        // a previous guest wrote this disk: if it will not mount, the
+        // session goes on without it rather than failing
+        if let Err(e) = mount_cache(dev, &home, cfg.uid, cfg.gid) {
+            eprintln!("acinit: build cache not mounted: {e}");
+        }
+    }
     for (i, t) in cfg.tools.iter().enumerate() {
         let rel = Path::new(t).strip_prefix("/").unwrap_or(Path::new(t));
         let lower = Path::new("/lower/tools").join(rel);
@@ -1008,6 +1015,31 @@ fn run() -> Result<()> {
     // not).  The timeout covers a host that has gone away.
     let _ = gone_rx.recv_timeout(Duration::from_secs(10));
     Ok(())
+}
+
+/// Mount the build cache disk `dev` and bind its `home` directory (created
+/// on first use, owned by `uid`:`gid`) onto `$HOME/.cache` (`home` is the
+/// home directory inside the new root).  Returns the first error.
+fn mount_cache(dev: &str, home: &Path, uid: u32, gid: u32) -> Result<()> {
+    // (the guest's own / is read-only: the mount point is on the scratch disk)
+    std::fs::create_dir_all("/scratch/cache")?;
+    // a sparse image's unused inode tables read as zeroes (see /scratch)
+    mount(dev, "/scratch/cache", "ext4", libc::MS_NOATIME | libc::MS_NOSUID | libc::MS_NODEV, "noinit_itable")?;
+    let own = |p: &Path| {
+        let c = cstr(p.as_os_str());
+        unsafe { libc::chown(c.as_ptr(), uid, gid) };
+    };
+    let src = Path::new("/scratch/cache/home");
+    if !src.is_dir() {
+        std::fs::create_dir(src)?;
+        own(src);
+    }
+    let dst = home.join(".cache");
+    if !dst.is_dir() {
+        std::fs::create_dir(&dst)?;
+        own(&dst);
+    }
+    mount("/scratch/cache/home", &dst.to_string_lossy(), "", libc::MS_BIND, "")
 }
 
 /// Write all of `d` to raw file descriptor `fd`, retrying after EINTR and
