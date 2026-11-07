@@ -99,13 +99,21 @@ struct Outcome {
 // guest side: the acrboot command
 // ---------------------------------------------------------------------------
 
+/// The kernel options Firecracker needs, for `acrboot --kconfig`.
+const KCONFIG: &str = include_str!("../kernel/acrboot.config");
+
 const USAGE: &str = "usage: acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]... VMLINUX
+       acrboot --kconfig    print the kernel options needed to boot under Firecracker
 
 Boot VMLINUX (an uncompressed ELF kernel) in a microVM of its own on the host
 and show its serial console.  Each --disk is attached read-write (a copy),
 the first as /dev/vda, which becomes the root device unless --append sets
 root=.  The VM has no network.  A kernel on its own is useful for built-in
 tests: --append \"kunit_shutdown=reboot\" ends the boot after KUnit.
+
+The kernel must be the uncompressed ELF vmlinux, configured for Firecracker:
+  acrboot --kconfig > acrboot.config
+  scripts/kconfig/merge_config.sh -m .config acrboot.config && make olddefconfig
 
 Exit status: 0 the kernel shut the VM down, 1 kernel panic, 124 timeout,
 2 error.  Defaults: 2 CPUs, 1G, 600s (capped at the session's CPUs and memory).
@@ -132,6 +140,10 @@ fn client_inner(args: &[String]) -> Result<i32> {
         match a.as_str() {
             "-h" | "--help" => {
                 print!("{USAGE}");
+                return Ok(0);
+            }
+            "--kconfig" => {
+                print!("{KCONFIG}");
                 return Ok(0);
             }
             "--cpus" => req.cpus = Some(val("--cpus")?.parse().ok().ctx("--cpus needs a number")?),

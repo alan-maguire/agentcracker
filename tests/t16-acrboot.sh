@@ -15,6 +15,8 @@ step "off by default"
 ac_run sh -c 'acrboot vmlinux; echo rc=$?'
 assert_contains "$AC_OUT" "rc=2" "acrboot fails"
 assert_contains "$AC_ERR$AC_OUT" "boot = true" "and says how to turn it on"
+ac_run sh -c 'test -e ~/.claude/skills/agentcracker-acrboot && echo skill; grep -c "agentcracker sandbox" ~/.claude/CLAUDE.md; grep -c "acrboot. boots" ~/.claude/CLAUDE.md'
+assert_eq "$AC_OUT" "$(printf '1\n0')" "the agent is told about its sandbox, but not about acrboot"
 
 step "a project cannot turn it on"
 echo 'boot = true' >.agentcracker.toml
@@ -24,6 +26,18 @@ assert_contains "$AC_ERR" "can only be set in" "naming the problem"
 rm .agentcracker.toml
 
 set_config 'boot = true' 'vcpus = 2' 'memory = "1G"'
+
+step "the agent is told"
+host_md=$(sha256sum "$REAL_HOME/.claude/CLAUDE.md" 2>/dev/null)
+ac_run sh -c 'sed -n 1,3p ~/.claude/skills/agentcracker-acrboot/SKILL.md; grep -c "agentcracker: begin" ~/.claude/CLAUDE.md; grep -c "acrboot. boots" ~/.claude/CLAUDE.md'
+assert_contains "$AC_OUT" "name: agentcracker-acrboot" "an acrboot skill is installed in the guest"
+assert_match "$AC_OUT" $'\n1\n1$' "and the instructions file mentions acrboot, once"
+first=$SID
+ac resume "$first" sh -c 'grep -c "agentcracker: begin" ~/.claude/CLAUDE.md'
+assert_eq "$AC_OUT" "1" "a later boot replaces the section instead of adding another"
+assert_eq "$(sha256sum "$REAL_HOME/.claude/CLAUDE.md" 2>/dev/null)" "$host_md" "the host's CLAUDE.md is untouched"
+ac_run sh -c 'acrboot --kconfig'
+assert_contains "$AC_OUT" "CONFIG_VIRTIO_BLK=y" "acrboot --kconfig prints the Firecracker kernel options"
 
 step "a kernel on its own"
 ac_run sh -c 'acrboot vmlinux > console.txt; echo rc=$?; grep -c "Kernel panic - not syncing" console.txt'

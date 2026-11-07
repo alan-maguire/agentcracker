@@ -411,10 +411,16 @@ timeout and 2 on an error.  The kernel must be the uncompressed ELF
 .I vmlinux
 (not a
 .IR bzImage )
-and built to boot under Firecracker: virtio-mmio with command-line
-devices, virtio-blk for disks, an 8250 serial console.  End the boot with
-a reboot (for KUnit,
+and built to boot under Firecracker:
+.B "acrboot \-\-kconfig"
+prints the options it needs, to merge with
+.BR scripts/kconfig/merge_config.sh .
+End the boot with a reboot (for KUnit,
 .BR kunit_shutdown=reboot ).
+The agent learns all this from an
+.B agentcracker\-acrboot
+skill installed in the guest when booting is enabled (see
+.BR AGENTS ).
 Each
 .B \-\-disk
 is attached as a read-write copy, the first as
@@ -688,6 +694,24 @@ that instruct agents
 .IR .cursor/ ,
 \&...) are flagged at review: every later agent run on the repository will
 follow them.
+.SS What the agent is told
+On every boot, agentcracker adds a short section to the guest's copy of
+the agent's user-level instructions file
+.RI ( ~/.claude/CLAUDE.md ,
+or Codex's
+.I AGENTS.md
+or
+.IR AGENTS.override.md ):
+its changes are reviewed before they reach the project directory, which
+hosts the network allows (and that a refused one means asking the user),
+that
+.I ~/.cache
+persists, and whether
+.B acrboot
+is available.  The section is marked, so the next boot replaces it; the
+rest of the file is the user's.  With booting enabled an
+.B agentcracker\-acrboot
+skill is installed too.  Neither ever reaches the host.
 .SH CONFIGURATION
 Settings are read from
 .I ~/.config/agentcracker/config.toml

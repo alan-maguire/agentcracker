@@ -911,6 +911,10 @@ fn run() -> Result<()> {
         }
     }
     extract_seed(seed, &home, cfg.uid, cfg.gid).ctx("seeding $HOME")?;
+    // (never fatal: the session is still useful without them)
+    if let Err(e) = write_agent_files(&home, &cfg.agent_files, cfg.uid, cfg.gid) {
+        eprintln!("acinit: agent guidance not written: {e}");
+    }
     let _ = std::fs::remove_file(seed);
 
     if cfg.net {
@@ -1017,6 +1021,45 @@ fn run() -> Result<()> {
     // not).  The timeout covers a host that has gone away.
     let _ = gone_rx.recv_timeout(Duration::from_secs(10));
     Ok(())
+}
+
+/// Write the agent guidance files (see [`crate::guidance`]) into `home`,
+/// with the user's filesystem credentials (`setfsuid`), so a symlink the
+/// agent left in its home cannot point these writes at root's files, and
+/// what is created belongs to the user.
+fn write_agent_files(home: &Path, files: &[crate::proto::AgentFile], uid: u32, gid: u32) -> Result<()> {
+    unsafe {
+        libc::setfsgid(gid);
+        libc::setfsuid(uid);
+    }
+    let r = (|| -> Result<()> {
+        for f in files {
+            let Some(rel) = crate::util::safe_rel_path(f.path.as_bytes()) else { continue };
+            let p = home.join(rel);
+            match &f.content {
+                None => {
+                    if std::fs::remove_file(&p).is_ok() {
+                        if let Some(d) = p.parent() {
+                            let _ = std::fs::remove_dir(d);
+                        }
+                    }
+                }
+                Some(c) => {
+                    if let Some(d) = p.parent() {
+                        std::fs::create_dir_all(d)?;
+                    }
+                    let text = if f.block { crate::guidance::with_section(&std::fs::read_to_string(&p).unwrap_or_default(), c) } else { c.clone() };
+                    std::fs::write(&p, text)?;
+                }
+            }
+        }
+        Ok(())
+    })();
+    unsafe {
+        libc::setfsuid(0);
+        libc::setfsgid(0);
+    }
+    r
 }
 
 /// Mount the build cache disk `dev` and bind its `home` directory (created

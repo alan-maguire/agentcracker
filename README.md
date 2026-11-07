@@ -288,6 +288,22 @@ output, use ccache: `make CC="ccache gcc"`).
   size and last use; `show` reports the session's.  `cache = false` in
   the config turns it off.
 
+### What the agent is told
+
+The agent would not otherwise know any of this.  On every boot acinit
+writes, in the guest only, a short section into the agent's user-level
+instructions file (`~/.claude/CLAUDE.md`; Codex's `AGENTS.md`, or
+`AGENTS.override.md` if you use one): that its changes are reviewed
+before they reach your directory, which hosts the network allows (and
+that a `403` means asking you, not retrying), that `~/.cache` persists,
+and, with `boot = true`, that `acrboot` exists.  The section sits between
+markers, so the next boot replaces it, and the rest of the file is yours.
+With `boot = true` it also installs an `agentcracker-acrboot` skill (in
+the agent's `skills/`, a format Claude Code and Codex share) with the
+details: configuring the kernel, KUnit, root disks, decoding a panic.  The
+files are written as you (`setfsuid`), and none of them leaves the VM: your
+host copies are never changed.
+
 ### Booting the agent's kernel: `acrboot`
 
 An agent working on a kernel can build it but not run it: Firecracker
@@ -310,12 +326,12 @@ acrboot --disk rootfs.img vmlinux                                          # a r
 ```
 
 - **The kernel** must be the uncompressed ELF `vmlinux` (Firecracker does
-  not boot a `bzImage`) with a configuration Firecracker can boot:
-  virtio-mmio (`CONFIG_VIRTIO_MMIO`, `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES`),
-  `CONFIG_VIRTIO_BLK` for disks, and an 8250 serial console.  Firecracker's
-  own guest configs (`firecracker/resources/guest_configs/`) are a known
-  good starting point.  End a boot with `reboot` (`kunit_shutdown=reboot`,
-  `reboot -f`): the VM stops when the kernel resets it.
+  not boot a `bzImage`) with the options Firecracker needs (virtio-mmio,
+  virtio-blk, ACPI, `KVM_GUEST`, an 8250 console; see
+  `firecracker/docs/kernel-policy.md`).  `acrboot --kconfig` prints them
+  (`kernel/acrboot.config`) for `scripts/kconfig/merge_config.sh`.  End a
+  boot with a reboot (`kunit_shutdown=reboot`, `reboot -f`): the VM stops
+  when the kernel resets it.
 - **The test VM** gets no network and no vsock, its disks as copies
   (read-write, discarded after), at most the session's CPUs and memory
   (default 2 CPUs and 1G), and a timeout (default 10 minutes).  It is

@@ -560,7 +560,20 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         dev_lower: "/dev/vdd".into(),
         dev_scratch: "/dev/vde".into(),
         dev_lower_delta: lower_delta.as_ref().map(|_| "/dev/vdf".into()),
-        dev_cache,
+        dev_cache: dev_cache.clone(),
+        agent_files: crate::guidance::agent_files(
+            profile,
+            &home(),
+            &crate::guidance::Context {
+                cwd: &s.meta.cwd,
+                net,
+                allow: &s.meta.allow,
+                cache: dev_cache.is_some(),
+                boot: cfg.boot,
+                vcpus: s.meta.vcpus,
+                mem_mib: s.meta.mem_mib,
+            },
+        ),
     };
     let seed = build_seed(&s.meta.cwd, cfg, first_boot, profile)?;
     crate::util::mark("home seed built");

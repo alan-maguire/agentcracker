@@ -176,6 +176,23 @@ pub struct GuestConfig {
     /// `$HOME/.cache`, if the session has it (see [`crate::buildcache`]).
     #[serde(default)]
     pub dev_cache: Option<String>,
+    /// Files acinit writes into `$HOME` on every boot, as the user: what the
+    /// agent is told about its environment (see [`crate::guidance`]).
+    #[serde(default)]
+    pub agent_files: Vec<AgentFile>,
+}
+
+/// One file acinit writes into the guest's home (see [`crate::guidance`]).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AgentFile {
+    /// Path relative to `$HOME`.
+    pub path: String,
+    /// The contents; `None` removes the file (and its directory, if that
+    /// is then empty).
+    pub content: Option<String>,
+    /// Replace only agentcracker's marked section of the file, keeping the
+    /// rest, instead of the whole file.
+    pub block: bool,
 }
 
 /// Write one frame: type `t`, the length of `data` as a big-endian u32,

@@ -455,6 +455,7 @@ All source is in `src/`.
 | `guest.rs` | acinit: mounts, overlays, seed, proxy relay, command, export, poweroff. |
 | `agent.rs` | Agent profiles (Claude Code, Codex): hosts, seeded files, login, state, environment. |
 | `activity.rs` | The `log` timeline: network log and transcript tool calls. |
+| `guidance.rs` | What the agent is told: the sandbox section of its instructions file, the acrboot skill. |
 | `acrboot.rs` | `acrboot`: the guest command, and the host side that boots test kernels in microVMs of their own. |
 | `buildcache.rs` | Per-project build caches (the guest's `~/.cache`): attach with a lock, list, drop. |
 | `changes.rs` | Change classification, diff, confined apply, branch import, agent state. |
@@ -474,6 +475,17 @@ and `Profile::path` resolves a path in the agent's directory, honouring
 `vm::credential_path` and `vm::guest_env` take the profile;
 `changes::transcripts` reads Claude's or Codex's transcripts, and
 `activity::tool_events` both formats.
+
+### `guidance.rs`
+
+`agent_files` decides, on every boot, what acinit writes into the guest's
+home (`GuestConfig::agent_files`): the sandbox section of the profile's
+instructions file (`Profile::instructions`), between `BEGIN` and `END`
+markers, and the `agentcracker-acrboot` skill when `boot = true` (or its
+removal).  acinit's `write_agent_files` writes them with the user's
+filesystem credentials (`setfsuid`), using `with_section` to replace the
+old section and keep the rest of the file.  These paths are not in the
+exported state, so they never reach the host.
 
 ### `acrboot.rs`
 

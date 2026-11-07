@@ -37,6 +37,10 @@ pub struct Profile {
     /// Paths inside the agent's directory kept when the session ends (its
     /// transcripts).
     pub state: &'static [&'static str],
+    /// Its user-level instructions file inside the agent's directory: the
+    /// first of these the user has, else the last.  agentcracker adds a
+    /// section about the sandbox to the guest's copy.
+    pub instructions: &'static [&'static str],
     /// Environment variable prefixes passed through to the guest.
     pub env_prefixes: &'static [&'static str],
     /// How to continue the agent's last conversation inside the session.
@@ -54,6 +58,7 @@ pub static CLAUDE: Profile = Profile {
     seed: &["settings.json", "CLAUDE.md", "commands", "agents", "skills", "plugins", "output-styles"],
     credential: ".credentials.json",
     state: &["projects"],
+    instructions: &["CLAUDE.md"],
     env_prefixes: &["ANTHROPIC_", "CLAUDE_CODE_"],
     resume: "claude --resume",
 };
@@ -73,6 +78,8 @@ pub static CODEX: Profile = Profile {
     seed: &["config.toml", "AGENTS.md", "AGENTS.override.md", "skills", "agents", "rules", "themes"],
     credential: "auth.json",
     state: &["sessions"],
+    // AGENTS.override.md replaces AGENTS.md when present
+    instructions: &["AGENTS.override.md", "AGENTS.md"],
     env_prefixes: &["OPENAI_", "CODEX_"],
     resume: "codex resume",
 };

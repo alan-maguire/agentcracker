@@ -90,6 +90,9 @@ set_config 'agent = "codex"'
 fakeenv ac_run sh -c 'test -e $HOME/.codex/auth.json && echo codex-seeded'
 assert_eq "$(meta agent)" "codex" "the agent config key picks the profile for other commands"
 assert_eq "$AC_OUT" "codex-seeded" "...with that profile's files"
+fakeenv ac_run sh -c 'cat $HOME/.codex/AGENTS.md'
+assert_contains "$AC_OUT" "Always run the tests." "Codex's global AGENTS.md keeps the user's text"
+assert_contains "$AC_OUT" "## agentcracker sandbox" "...and gains the sandbox section"
 fakeenv ac resume "$SID" true
 assert_contains "$AC_ERR" "net: OpenAI API only" "resume keeps the session's profile"
 set_config 'agent = "nosuch"'

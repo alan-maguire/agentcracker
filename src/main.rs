@@ -30,6 +30,7 @@ mod changes;
 mod cli;
 mod config;
 mod erofs;
+mod guidance;
 mod guest;
 mod images;
 mod proto;
