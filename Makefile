@@ -130,14 +130,16 @@ install:
 	  echo "$$f is missing; run 'make' (without sudo) first"; exit 1; }; done
 	install -d $(BINDIR) $(LIBDIR) $(MANDIR)
 	install -m 0755 $(AC_BIN) $(BINDIR)/agentcracker
+	ln -sf agentcracker $(BINDIR)/acr
 	install -m 0755 $(AC_INIT) $(LIBDIR)/acinit
 	install -m 0755 $(FC_BIN) $(LIBDIR)/firecracker
 	install -m 0644 $(VMLINUX) $(LIBDIR)/vmlinux
 	install -m 0644 $(SECCOMP) $(LIBDIR)/seccomp.bpf
 	install -m 0644 man/agentcracker.1 $(MANDIR)/agentcracker.1
+	ln -sf agentcracker.1 $(MANDIR)/acr.1
 	@echo "installed agentcracker into $(PREFIX)"
 
 uninstall:
-	rm -f $(BINDIR)/agentcracker $(MANDIR)/agentcracker.1
+	rm -f $(BINDIR)/agentcracker $(BINDIR)/acr $(MANDIR)/agentcracker.1 $(MANDIR)/acr.1
 	rm -f $(LIBDIR)/acinit $(LIBDIR)/firecracker $(LIBDIR)/vmlinux $(LIBDIR)/seccomp.bpf
 	-rmdir $(LIBDIR)

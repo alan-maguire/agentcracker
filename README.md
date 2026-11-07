@@ -9,7 +9,7 @@ $ make                    # builds firecracker (submodule), a guest kernel and
 $ make test               # optional: run tests/ against the build
 $ sudo make install       # copies into /usr/local (or: make install PREFIX=~/.local)
 $ cd ~/src/myproject
-$ agentcracker claude     # or: agentcracker codex
+$ agentcracker claude     # or: agentcracker codex  (acr is short for agentcracker)
                           # the first run snapshots /usr (~30s on btrfs); after that
                           # a VM is up in ~0.3s and gone ~0.3s after the agent exits
 ```
@@ -872,6 +872,7 @@ decide which role it is playing.  Layout after `make install`:
 
 ```
 $PREFIX/bin/agentcracker                         (PREFIX defaults to /usr/local)
+$PREFIX/bin/acr -> agentcracker                  short alias
 $PREFIX/lib/agentcracker/{acinit,firecracker,vmlinux,seccomp.bpf}
 ~/.cache/agentcracker/{usr,tools,base,lower}/   cached images
 ~/.local/state/agentcracker/sessions/<id>/      per-session state
