@@ -110,7 +110,8 @@ a kernel in a microVM of its own, inside this one (no network), and shows
 its serial console.
 
 ```
-acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]... VMLINUX
+acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]...
+        [--run CMD [--dir DIR]] VMLINUX
 ```
 
 Exit status: 0 the kernel shut the VM down, 1 kernel panic, 124 timeout,
