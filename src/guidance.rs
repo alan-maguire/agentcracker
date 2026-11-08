@@ -87,7 +87,7 @@ fn instructions(c: &Context) -> String {
     if c.boot {
         s.push_str(&format!(
             "- `acrboot` boots a Linux kernel you built in a separate microVM and shows its console - for KUnit, \
-             boot tests and reproducing crashes.  See the `{SKILL}` skill, or `acrboot --help`.\n"
+             boot tests, selftests (e.g. the BPF selftests) and reproducing crashes.  See the `{SKILL}` skill, or `acrboot --help`.\n"
         ));
     }
     s.push_str(END);
@@ -100,7 +100,7 @@ fn skill(c: &Context) -> String {
     format!(
         r#"---
 name: {SKILL}
-description: Boot a Linux kernel you built in a separate microVM and read its console - run KUnit tests, check that a change boots, reproduce a crash. Use in a Linux kernel tree when compiling is not enough and the kernel has to run.
+description: Boot a Linux kernel you built in a separate microVM and read its console - run KUnit tests, run selftests (e.g. the BPF selftests' test_progs) against it, check that a change boots, reproduce a crash. Use in a Linux kernel tree when compiling is not enough and the kernel has to run.
 ---
 
 # Booting a kernel you built: acrboot
@@ -115,7 +115,8 @@ acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]..
 ```
 
 Exit status: 0 the kernel shut the VM down, 1 kernel panic, 124 timeout,
-2 error.  Defaults 2 CPUs, 1G, 600s; at most {vcpus} CPUs and {mem}M here
+2 error; with `--run`, CMD's status (124 timeout, 125 the VM ended before
+CMD finished).  Defaults 2 CPUs, 1G, 600s; at most {vcpus} CPUs and {mem}M here
 (the test VM's memory comes out of this VM's).
 
 ## 1. Configure the kernel to boot under Firecracker
