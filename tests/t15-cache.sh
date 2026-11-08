@@ -4,7 +4,6 @@
 # `cache = false`.
 . "$(dirname "$0")/lib.sh"
 require_vm
-require_cmd flock
 
 cache_root=$XDG_STATE_HOME/agentcracker/caches
 
@@ -33,10 +32,11 @@ assert_match "$AC_OUT" "/other$" "with their directories"
 step "one running session at a time"
 cd "$WORK/proj"
 id=$("$AC" --detach sh -c 'echo held > ~/.cache/held; sleep 4' </dev/null)
-# wait for it to take the cache
+# wait for it to take the cache (looked up in /proc/locks: probing with
+# flock would hold the lock for a moment, and the session could lose it)
 lock=$(dirname "$(grep -lx "$WORK/proj" "$cache_root"/*/dir)")/lock
 for _ in $(seq 150); do
-    flock -n "$lock" true 2>/dev/null || break
+    [ -e "$lock" ] && grep -q ":$(stat -c %i "$lock") " /proc/locks && break
     sleep 0.1
 done
 ac_run sh -c 'cat ~/.cache/n 2>/dev/null || echo empty'
