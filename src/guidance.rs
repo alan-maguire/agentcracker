@@ -105,17 +105,17 @@ description: Boot a Linux kernel you built in a separate microVM and read its co
 
 # Booting a kernel you built: acrboot
 
-You are in an agentcracker VM, which cannot run a kernel itself.  `acrboot`
-hands one to the host, which boots it in a microVM of its own (no network)
-and streams its serial console back to you.
+You are in an agentcracker VM with nested virtualisation: `acrboot` boots
+a kernel in a microVM of its own, inside this one (no network), and shows
+its serial console.
 
 ```
 acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]... VMLINUX
 ```
 
 Exit status: 0 the kernel shut the VM down, 1 kernel panic, 124 timeout,
-2 error.  Defaults 2 CPUs, 1G, 600s; at most {vcpus} CPUs and {mem}M here.
-One boot runs at a time.
+2 error.  Defaults 2 CPUs, 1G, 600s; at most {vcpus} CPUs and {mem}M here
+(the test VM's memory comes out of this VM's).
 
 ## 1. Configure the kernel to boot under Firecracker
 
@@ -148,8 +148,8 @@ the kernel goes on to look for a root disk and panics.
 
 ## 3. Boot to userspace
 
-`--disk FILE` attaches a disk image (a copy, read-write); the first is
-`/dev/vda` and becomes the root device unless `--append` sets `root=`.
+`--disk FILE` attaches a disk image, read-write and in place (copy it
+first to keep the original); the first is `/dev/vda` and becomes the root device unless `--append` sets `root=`.
 Make one from a directory with `mkfs.ext4 -d DIR rootfs.img 512M`, and
 give it an init (`--append init=/path`).  Have the init end with a reboot
 (`reboot -f`, or `echo b > /proc/sysrq-trigger`): the VM stops when the
@@ -171,11 +171,12 @@ scripts/decode_stacktrace.sh vmlinux < console.log
 - No modules are loaded: build what the test needs in (`=y`).
 - The test VM has virtio block devices and a serial console only: no
   network, no PCI devices, no other hardware.
-- Each boot's console is also kept with the session for the user
+- Each boot's console is also kept in `~/.local/state/acrboot/N.console`
+  (the first 4M, the last 20 boots), which the user sees with the session
   (`agentcracker log` lists the boots).
 "#,
         vcpus = c.vcpus,
-        mem = c.mem_mib
+        mem = c.mem_mib.saturating_sub(crate::acrboot::RESERVE_MIB).max(128)
     )
 }
 

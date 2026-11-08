@@ -80,7 +80,8 @@ fn first_boot_seed(cwd: &Path, cfg: &Config, p: &Profile) -> Vec<String> {
 /// Paths below `$HOME` exported from the guest to the session store on exit:
 /// the agent profile's state (its transcripts), its credentials file (only
 /// to notice a refresh; see [`crate::changes::guest_refreshed_credentials`]),
-/// and the configured `state` entries.
+/// the configured `state` entries, and the test kernel boots
+/// ([`crate::acrboot::RECORDS`]).
 ///
 /// `cfg`: supplies `state`; `p`: the agent profile.  Returns paths relative
 /// to `$HOME`.
@@ -89,6 +90,8 @@ pub fn state_paths(cfg: &Config, p: &Profile) -> Vec<String> {
     let mut v: Vec<String> = p.state.iter().map(|s| p.path(&h, s)).collect();
     v.push(credential_path(p));
     v.extend(cfg.state.iter().map(|h| h.trim_start_matches("~/").to_string()));
+    // acrboot's records (kept even if `boot` was turned off since)
+    v.push(crate::acrboot::RECORDS.to_string());
     v
 }
 
@@ -438,7 +441,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         crate::bail!("cannot open /dev/kvm: add yourself to the kvm group (sudo usermod -aG kvm $USER)");
     }
 
-    let base = images::base_image(&acinit)?;
+    let base = images::base_image(&acinit, &fc_bin)?;
     crate::util::mark("base image");
     let usr = images::usr_image(cfg, Refresh::Auto)?;
     crate::util::mark("usr image check");
@@ -465,23 +468,6 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         log: Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(s.path("net.log")).ok()),
     });
     crate::proxy::serve(proxy_l, proxy);
-    // test kernels (acrboot), only when the user turned it on
-    let test_vm = Arc::new(crate::acrboot::TestVm::default());
-    if cfg.boot {
-        let p = rundir.join(format!("v.sock_{}", crate::acrboot::PORT_BOOT));
-        let _ = std::fs::remove_file(&p);
-        let l = UnixListener::bind(&p).ctx("bind boot socket")?;
-        crate::acrboot::serve(
-            l,
-            crate::acrboot::Server {
-                dir: s.path("boots"),
-                log: s.path("boot.log"),
-                max_cpus: s.meta.vcpus,
-                max_mem_mib: s.meta.mem_mib,
-                vm: test_vm.clone(),
-            },
-        );
-    }
 
     let mut args = String::from(
         "console=ttyS0 reboot=k panic=1 pci=off nomodule i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd \
@@ -561,6 +547,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         dev_scratch: "/dev/vde".into(),
         dev_lower_delta: lower_delta.as_ref().map(|_| "/dev/vdf".into()),
         dev_cache: dev_cache.clone(),
+        boot: cfg.boot,
         agent_files: crate::guidance::agent_files(
             profile,
             &home(),
@@ -621,7 +608,6 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         let _ = fc.kill();
         let _ = fc.wait();
     }
-    crate::acrboot::stop(&test_vm);
     let _ = std::fs::remove_dir_all(&rundir);
     s.meta.runtime += t0.elapsed().as_secs();
     s.meta.boots += 1;

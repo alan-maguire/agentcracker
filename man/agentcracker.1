@@ -403,8 +403,16 @@ acrboot [\-\-cpus N] [\-\-mem SIZE] [\-\-timeout SECS] [\-\-append ARGS]
         [\-\-disk FILE]... VMLINUX
 .EE
 .PP
-The kernel (and the disks) go to the host, which boots them in a microVM
-of their own and streams its serial console back.
+The session's VM has nested virtualisation for this: the kernel boots in
+a Firecracker microVM of its own inside the session's, and its serial
+console is shown.  The host's KVM must allow it
+.RB ( kvm_intel " or " kvm_amd
+with
+.BR nested=1 );
+without
+.B boot = true
+the guest has no
+.IR /dev/kvm .
 .B acrboot
 exits 0 when the kernel shut the VM down, 1 on a kernel panic, 124 on a
 timeout and 2 on an error.  The kernel must be the uncompressed ELF
@@ -423,19 +431,24 @@ skill installed in the guest when booting is enabled (see
 .BR AGENTS ).
 Each
 .B \-\-disk
-is attached as a read-write copy, the first as
+is attached read-write, in place, the first as
 .IR /dev/vda ,
 which is the root device unless
 .B \-\-append
 sets
 .BR root= .
 .PP
-The test VM has no network, at most the session's CPUs and memory
+The test VM has no network, CPUs and memory out of the session's
 (default 2 CPUs and 1G), and a timeout (default 600 seconds); it is
-stopped a few seconds after a panic, and when the session ends.  One runs
-at a time per session.  Each boot's console is kept as
-.I boots/N.console
-in the session, and each boot appears in
+stopped a few seconds after a panic, and when the session ends.  Each
+boot is recorded in the guest's
+.IR ~/.local/state/acrboot/ :
+a line in
+.I boot.log
+and its console (the first 4M, last 20 boots) as
+.IR N.console .
+These come out with the session's state when the VM stops, and each boot
+appears in
 .BR "agentcracker log" .
 .PP
 It is off by default and cannot be turned on by a project's
@@ -835,20 +848,18 @@ and
 .I changes.stream
 (the changes, as exported on exit),
 .I state/
-(the agent's transcripts),
+(the agent's transcripts, and
+.B acrboot
+records in
+.IR state/.local/state/acrboot/ ),
 .I stdout
 and
 .I stderr
 (output of sessions run with
 .BR \-\-detach ),
-.IR net.log ,
-.I console.log
-and, with
-.BR acrboot ,
-.I boot.log
+.I net.log
 and
-.I boots/
-(each test boot's console).
+.IR console.log .
 .TP
 .I ~/.local/state/agentcracker/caches/KEY/
 One directory per project with a build cache:

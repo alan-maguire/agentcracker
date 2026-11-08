@@ -173,7 +173,7 @@ fn overlay_layers(lowers: &[&str], scratch_name: &str, target: &str) -> Result<(
 /// (read, write, shutdown) are used on it, and those work on any socket.
 /// Errors if the socket cannot be created or nothing listens on the host
 /// yet.
-pub fn vsock_connect(port: u32) -> io::Result<UnixStream> {
+fn vsock_connect(port: u32) -> io::Result<UnixStream> {
     unsafe {
         let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 {
@@ -841,6 +841,15 @@ fn run() -> Result<()> {
     set_clock(cfg.time);
     let hn = b"agentcracker";
     unsafe { libc::sethostname(hn.as_ptr().cast(), hn.len()) };
+
+    // KVM, for acrboot's test VMs: the user's with `boot = true`, nobody's
+    // otherwise (devtmpfs makes it root's, 0600, and nothing here runs as
+    // root after this)
+    if cfg.boot {
+        let _ = std::fs::set_permissions("/dev/kvm", std::os::unix::fs::PermissionsExt::from_mode(0o666));
+    } else {
+        let _ = std::fs::remove_file("/dev/kvm");
+    }
 
     // disks
     // the scratch image is a fresh sparse file whose inode tables already

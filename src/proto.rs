@@ -176,6 +176,10 @@ pub struct GuestConfig {
     /// `$HOME/.cache`, if the session has it (see [`crate::buildcache`]).
     #[serde(default)]
     pub dev_cache: Option<String>,
+    /// Booting test kernels is on (`boot = true`): `/dev/kvm` is made
+    /// usable by the user, and removed otherwise.
+    #[serde(default)]
+    pub boot: bool,
     /// Files acinit writes into `$HOME` on every boot, as the user: what the
     /// agent is told about its environment (see [`crate::guidance`]).
     #[serde(default)]

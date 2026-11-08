@@ -1032,8 +1032,8 @@ fn cmd_refresh(args: &[String]) -> Result<i32> {
     if !bg {
         let tools = images::detect_tools(&cfg, &cwd);
         images::tools_image(&cfg, &tools)?;
-        if let Ok(a) = images::find_asset("acinit") {
-            images::base_image(&a)?;
+        if let (Ok(a), Ok(f)) = (images::find_asset("acinit"), images::find_asset("firecracker")) {
+            images::base_image(&a, &f)?;
         }
     }
     Ok(0)
@@ -1277,12 +1277,13 @@ fn cmd_stop(args: &[String]) -> Result<i32> {
 }
 
 /// `agentcracker log [--json] [-f] [SESSION]`: the session's activity as
-/// one timeline - every connection attempt through the proxy and every
-/// tool call in the agent's transcripts (see [`crate::activity`]).
+/// one timeline - every connection attempt through the proxy, every tool
+/// call in the agent's transcripts and every test kernel boot (see
+/// [`crate::activity`]).
 ///
 /// With `-f` on a running session, new network events are printed as they
-/// happen; the agent's tool calls follow when the session ends (that is
-/// when its transcripts are copied out).  Returns 0.
+/// happen; the agent's tool calls and boots follow when the session ends
+/// (that is when its state is copied out).  Returns 0.
 fn cmd_log(args: &[String]) -> Result<i32> {
     use crate::activity::{self, Event};
     let (json, rest) = split_json(args);
@@ -1294,10 +1295,14 @@ fn cmd_log(args: &[String]) -> Result<i32> {
     let s = session::find(rest.first().map(|a| a.as_str()), &cwd()?)?;
     let net = s.path("net.log");
     let (mut events, mut off) = activity::net_events(&net, 0);
-    let boots = s.path("boot.log");
-    let (b, mut boff) = activity::boot_events(&boots, 0);
-    events.extend(b);
-    let tools = activity::tool_events(&s);
+    // the agent's tool calls and its test kernel boots: both come out of
+    // the VM with its state when it stops
+    let late_events = |s: &Session| {
+        let mut v = activity::tool_events(s);
+        v.extend(activity::boot_events(&s.path("state").join(crate::acrboot::RECORDS).join("boot.log")));
+        v
+    };
+    let tools = late_events(&s);
     let seen: std::collections::HashSet<(u64, String, String)> = tools.iter().map(|e| (e.time.to_bits(), e.kind.clone(), e.detail.clone())).collect();
     events.extend(tools);
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
@@ -1320,9 +1325,6 @@ fn cmd_log(args: &[String]) -> Result<i32> {
             let running = s.is_running();
             let (mut new, o) = activity::net_events(&net, off);
             off = o;
-            let (b, o) = activity::boot_events(&boots, boff);
-            boff = o;
-            new.extend(b);
             new.sort_by(|a, b| a.time.total_cmp(&b.time));
             new.iter().for_each(emit);
             if !running {
@@ -1330,13 +1332,13 @@ fn cmd_log(args: &[String]) -> Result<i32> {
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        let mut late: Vec<Event> = activity::tool_events(&s)
+        let mut late: Vec<Event> = late_events(&s)
             .into_iter()
             .filter(|e| !seen.contains(&(e.time.to_bits(), e.kind.clone(), e.detail.clone())))
             .collect();
         late.sort_by(|a, b| a.time.total_cmp(&b.time));
         if !late.is_empty() && !json {
-            out!("-- the agent's tool calls during the session (its transcripts are copied out when it ends) --");
+            out!("-- the agent's tool calls and test boots during the session (copied out when it ends) --");
         }
         late.iter().for_each(emit);
     } else if events.is_empty() && !json {

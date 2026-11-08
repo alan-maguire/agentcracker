@@ -55,35 +55,33 @@ pub fn net_events(path: &Path, from: u64) -> (Vec<Event>, u64) {
     (out, from + end as u64)
 }
 
-/// Parse `boot.log` (test kernels booted with `acrboot`, see
-/// [`crate::acrboot`]) from byte offset `from`, like [`net_events`].  Each
+/// Parse the boot records `acrboot` keeps in the guest
+/// (`<state>/.local/state/acrboot/boot.log`, see [`crate::acrboot`]).  Each
 /// line is `<time> <outcome> <secs> <kernel bytes> <disks> <append...>`.
-pub fn boot_events(path: &Path, from: u64) -> (Vec<Event>, u64) {
-    use std::io::{Read, Seek};
+/// The guest wrote it: malformed lines are skipped, and the text is
+/// escaped when rendered.
+pub fn boot_events(path: &Path) -> Vec<Event> {
     let mut out = Vec::new();
-    let Ok(mut f) = std::fs::File::open(path) else { return (out, from) };
-    if f.seek(std::io::SeekFrom::Start(from)).is_err() {
-        return (out, from);
-    }
-    let mut buf = Vec::new();
-    let _ = f.read_to_end(&mut buf);
-    let end = buf.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
-    for line in String::from_utf8_lossy(&buf[..end]).lines() {
+    let Ok(buf) = std::fs::read(path) else { return out };
+    for line in String::from_utf8_lossy(&buf).lines() {
         let mut it = line.splitn(6, ' ');
         let (Some(t), Some(outcome), Some(secs), Some(size), Some(disks)) = (it.next(), it.next(), it.next(), it.next(), it.next()) else { continue };
-        let Ok(time) = t.parse::<f64>() else { continue };
-        let size = crate::util::human_bytes(size.parse().unwrap_or(0));
-        let disks = match disks { "0" => String::new(), "1" => ", 1 disk".into(), n => format!(", {n} disks") };
+        let (Ok(time), Ok(secs), Ok(size), Ok(disks)) = (t.parse::<f64>(), secs.parse::<f64>(), size.parse::<u64>(), disks.parse::<u32>()) else { continue };
+        if !matches!(outcome, "exit" | "panic" | "timeout" | "error") {
+            continue;
+        }
+        let size = crate::util::human_bytes(size);
+        let disks = match disks { 0 => String::new(), 1 => ", 1 disk".into(), n => format!(", {n} disks") };
         let append = it.next().filter(|a| !a.is_empty()).map(|a| format!(": {a}")).unwrap_or_default();
         out.push(Event {
             time,
             kind: "boot".into(),
-            detail: format!("{size} kernel{disks}, {secs}s{append}"),
+            detail: format!("{size} kernel{disks}, {secs:.1}s{append}"),
             verdict: Some(outcome.to_ascii_uppercase()),
             server_side: false,
         });
     }
-    (out, from + end as u64)
+    out
 }
 
 /// The agent's tool calls from the transcripts in the session's exported

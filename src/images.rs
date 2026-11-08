@@ -649,7 +649,8 @@ fn etc_tree(tree: &mut Tree, etc: usize, stats: &mut WalkStats) -> Result<()> {
 
 /// Return the base root filesystem image, building it if needed.
 ///
-/// Contents: `/acinit`, copied from `acinit`; the usual top-level
+/// Contents: `/acinit`, copied from `acinit`; Firecracker and its seccomp
+/// filter in `/acboot`, for test VMs (`acrboot`); the usual top-level
 /// directories plus the mount points acinit uses (`/scratch`,
 /// `/lower/{base,usr,tools,proj}`, `/newroot`); the host's usr-merge
 /// symlinks (`/bin -> usr/bin` and so on); the allowlisted /etc entries
@@ -657,13 +658,15 @@ fn etc_tree(tree: &mut Tree, etc: usize, stats: &mut WalkStats) -> Result<()> {
 /// `resolv.conf` that know only root, the invoking user and nobody; and an
 /// empty home directory owned by the user.
 ///
-/// The cache key covers the invoking user's identity, acinit's mtime, the
+/// The cache key covers the invoking user's identity, the mtimes of
+/// acinit, Firecracker and the seccomp filter, the
 /// allowlisted /etc entries and the usr-merge symlinks, so the image is
 /// rebuilt whenever any of them change.  Warns if the host is not
 /// usr-merged (programs in a real `/bin` would be missing in the guest).
 ///
-/// `acinit`: path of the static acinit binary.  Returns the image path.
-pub fn base_image(acinit: &Path) -> Result<PathBuf> {
+/// `acinit`: path of the static acinit binary; `firecracker`: the
+/// Firecracker binary.  Returns the image path.
+pub fn base_image(acinit: &Path, firecracker: &Path) -> Result<PathBuf> {
     let dir = cache_dir().join("base");
     crate::util::mkdir_private(&dir)?;
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -675,6 +678,11 @@ pub fn base_image(acinit: &Path) -> Result<PathBuf> {
     let mut h = Fnv::new();
     h.str(FORMAT).str(&user).str(&group).u64(uid as u64).u64(gid as u64).bytes(hm.as_os_str().as_bytes()).str(&shell);
     mtime_sig(&mut h, acinit);
+    mtime_sig(&mut h, firecracker);
+    let seccomp = find_asset("seccomp.bpf").ok();
+    if let Some(f) = &seccomp {
+        mtime_sig(&mut h, f);
+    }
     for name in ETC_ALLOW {
         let mut budget = 200;
         dir_sig(&mut h, &Path::new("/etc").join(name), 1, &mut budget);
@@ -696,6 +704,13 @@ pub fn base_image(acinit: &Path) -> Result<PathBuf> {
     let mut t = Tree::new(0o755, 0, 0);
     let acinit_data = std::fs::read(acinit).ctx(format!("read {}", acinit.display()))?;
     t.add(0, b"acinit", Node::bytes(acinit_data, 0o755, 0, 0));
+    // test VMs (acrboot): /acboot/firecracker and /acboot/seccomp.bpf
+    let acboot = t.mkdir_p(Path::new("acboot"), 0o755, 0, 0);
+    let fc_data = std::fs::read(firecracker).ctx(format!("read {}", firecracker.display()))?;
+    t.add(acboot, b"firecracker", Node::bytes(fc_data, 0o755, 0, 0));
+    if let Some(f) = &seccomp {
+        t.add(acboot, b"seccomp.bpf", Node::bytes(std::fs::read(f).ctx(format!("read {}", f.display()))?, 0o644, 0, 0));
+    }
     for (d, mode) in [
         ("proc", 0o555), ("sys", 0o555), ("dev", 0o755), ("run", 0o755), ("tmp", 0o1777),
         ("mnt", 0o755), ("scratch", 0o700), ("lower", 0o700), ("lower/base", 0o755),

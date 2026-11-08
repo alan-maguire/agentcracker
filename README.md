@@ -306,19 +306,19 @@ host copies are never changed.
 
 ### Booting the agent's kernel: `acrboot`
 
-An agent working on a kernel can build it but not run it: Firecracker
-offers no nested virtualisation, so virtme-ng and QEMU are out.  The host
-can boot it, though.  With `boot = true` in `~/.config/agentcracker/config.toml`,
-every session has an `acrboot` command:
+An agent working on a kernel can build it, and with `boot = true` in
+`~/.config/agentcracker/config.toml` it can run it too: the session's VM
+gets nested virtualisation (`/dev/kvm`, with the host's VMX or SVM passed
+through) and an `acrboot` command:
 
 ```
 acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]... VMLINUX
 ```
 
-It sends the kernel (and any disks) to the host, which boots it in a
-microVM of its own and streams the serial console back; `acrboot` exits
-0 when the kernel shut the VM down, 1 on a panic, 124 on a timeout, 2 on
-an error.  Two uses:
+It boots the kernel in a Firecracker microVM of its own, inside the
+session's, and shows the serial console; `acrboot` exits 0 when the
+kernel shut the VM down, 1 on a panic, 124 on a timeout, 2 on an error.
+Two uses:
 
 ```
 acrboot --append "kunit.filter_glob=list* kunit_shutdown=reboot" vmlinux   # built-in KUnit suites
@@ -332,22 +332,28 @@ acrboot --disk rootfs.img vmlinux                                          # a r
   (`kernel/acrboot.config`) for `scripts/kconfig/merge_config.sh`.  End a
   boot with a reboot (`kunit_shutdown=reboot`, `reboot -f`): the VM stops
   when the kernel resets it.
-- **The test VM** gets no network and no vsock, its disks as copies
-  (read-write, discarded after), at most the session's CPUs and memory
-  (default 2 CPUs and 1G), and a timeout (default 10 minutes).  It is
-  stopped a few seconds after a panic, and when the session ends.  One
-  runs at a time per session; another `acrboot` waits its turn.
-- **On record.**  Each boot's console is kept in the session
-  (`boots/<n>.console`) and each boot is a `boot` line in
-  `agentcracker log` (`boot  PANIC  29M kernel, 1.3s: panic=0`).
-- **Opt-in, and only by you.**  It hands the agent ring 0 in a VM, so the
-  boundary becomes KVM and Firecracker's device emulation facing a guest
-  kernel the agent controls.  That is Firecracker's own threat model, but
-  more than a session otherwise exposes, so it is off by default, and a
-  project's `.agentcracker.toml` cannot turn it on (a cloned repository
-  must not grant that to its agents).  The host never parses what it is
-  sent: the kernel and disks are size-capped files given to Firecracker;
-  only the small JSON request is read, and its values are clamped.
+- **The test VM** gets no network and no vsock, its disks read-write in
+  place, CPUs and memory out of the session's (default 2 CPUs and 1G),
+  and a timeout (default 10 minutes).  It is stopped a few seconds after a
+  panic, and when the session ends.  A boot to init takes about half a
+  second.
+- **On record.**  Each boot is a line in the guest's
+  `~/.local/state/acrboot/boot.log`, with its console (the first 4M, last
+  20 boots) beside it.  They come out with the session's state when the
+  VM stops, so each boot is a `boot` line in `agentcracker log`
+  (`boot  PANIC  29M kernel, 1.3s: panic=0`).
+- **The host** must allow nested virtualisation: `kvm_intel` or `kvm_amd`
+  with `nested=1` (the default on current kernels; check
+  `/sys/module/kvm_intel/parameters/nested`).  Without it `acrboot` says
+  so.
+- **Opt-in, and only by you.**  Nothing runs on the host: a test kernel
+  that escapes its VM lands in the session's VM, and its disk, memory and
+  CPUs are the session's.  But it hands the agent ring 0 in a VM whose
+  exits the host's KVM handles first, so the host's nested-virtualisation
+  code faces a kernel the agent controls - more than a session otherwise
+  exposes.  So it is off by default (and without it the guest has no
+  `/dev/kvm`), and a project's `.agentcracker.toml` cannot turn it on (a
+  cloned repository must not grant that to its agents).
 
 ## Kernel and root filesystem: the host's own userspace
 
