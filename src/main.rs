@@ -48,6 +48,10 @@ mod vm;
 /// or 1 after printing `agentcracker: <error>` to stderr.
 fn main() {
     if std::process::id() == 1 {
+        // a test VM's init (acrboot --run), chosen on its kernel command line
+        if std::env::var_os("acrboot_run").is_some() {
+            acrboot::init();
+        }
         guest::main();
     }
     let args: Vec<String> = std::env::args().collect();

@@ -400,7 +400,7 @@ built:
 .PP
 .EX
 acrboot [\-\-cpus N] [\-\-mem SIZE] [\-\-timeout SECS] [\-\-append ARGS]
-        [\-\-disk FILE]... VMLINUX
+        [\-\-disk FILE]... [\-\-run CMD [\-\-dir DIR]] VMLINUX
 .EE
 .PP
 The session's VM has nested virtualisation for this: the kernel boots in
@@ -437,6 +437,35 @@ which is the root device unless
 .B \-\-append
 sets
 .BR root= .
+.PP
+.B \-\-run
+.I CMD
+boots the kernel on the session's own userspace instead: its root and
+.I /usr
+images, read-only, and a copy of
+.I DIR
+(default the current directory) at the same path, read-write and
+discarded after.  Its init mounts
+.IR /proc ,
+.IR /sys ,
+.IR /dev ,
+tmpfs on
+.I /tmp
+and others, bpffs, debugfs, tracefs and cgroup2, brings up
+.BR lo ,
+and runs
+.I CMD
+as root with
+.B sh \-c
+in
+.IR DIR ;
+.B acrboot
+then exits with its status (124 on a timeout, 125 if the VM ended
+without it finishing).  For the BPF selftests:
+.PP
+.EX
+acrboot \-\-timeout 3600 \-\-dir tools/testing/selftests/bpf \-\-run ./test_progs vmlinux
+.EE
 .PP
 The test VM has no network, CPUs and memory out of the session's
 (default 2 CPUs and 1G), and a timeout (default 600 seconds); it is

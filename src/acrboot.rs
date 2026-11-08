@@ -8,9 +8,22 @@
 //! when the kernel shut the VM down, 1 on a panic, 124 on a timeout, 2 on
 //! an error.
 //!
-//! Two uses: a kernel on its own (built-in KUnit suites with
-//! `kunit_shutdown=reboot`, boot smoke tests), and a kernel with a root
-//! disk the agent made (`--disk rootfs.img`, mounted as `/dev/vda`).
+//! Three uses: a kernel on its own (built-in KUnit suites with
+//! `kunit_shutdown=reboot`, boot smoke tests); a kernel with a root disk
+//! the agent made (`--disk rootfs.img`, mounted as `/dev/vda`); and a
+//! command run on the session's own userspace (`--run CMD`, e.g. the BPF
+//! selftests), described next.
+//!
+//! With `--run`, the test VM's disks are the session's base image (the
+//! root, read-only), its `/usr` image (read-only), a small spec disk (the
+//! command and directory, as JSON) and an ext4 copy of `--dir` (default
+//! `.`).  Its init is acinit again: [`init`] (chosen by `acrboot_run=1` on
+//! the kernel command line, which the kernel passes to init as an
+//! environment variable) mounts the usual filesystems and those test
+//! suites expect (bpffs, debugfs, tracefs, cgroup2), mounts the copy at
+//! the same path, runs the command there as root and prints
+//! [`RUN_STATUS`] with its exit status before resetting the VM; `acrboot`
+//! exits with that status.
 //!
 //! It is opt-in (`boot = true`, in the user's config only): acinit makes
 //! `/dev/kvm` usable by the agent only then, and removes it otherwise.
@@ -41,6 +54,14 @@ use crate::util::{Context, Result};
 pub const FIRECRACKER: &str = "/acboot/firecracker";
 pub const SECCOMP: &str = "/acboot/seccomp.bpf";
 
+/// The session's base image and `/usr` image, as the guest sees them
+/// (see `vm::boot`); acinit makes them readable by the user with `boot`.
+pub const DEV_BASE: &str = "/dev/vda";
+pub const DEV_USR: &str = "/dev/vdb";
+
+/// What [`init`] prints when the command exits: this, then the status.
+const RUN_STATUS: &str = "acrboot: --run exited with status ";
+
 /// The guest directory holding boot records, relative to `$HOME`.
 pub const RECORDS: &str = ".local/state/acrboot";
 
@@ -58,7 +79,8 @@ pub const RESERVE_MIB: u64 = 512;
 /// The kernel options Firecracker needs, for `acrboot --kconfig`.
 const KCONFIG: &str = include_str!("../kernel/acrboot.config");
 
-const USAGE: &str = "usage: acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]... VMLINUX
+const USAGE: &str = "usage: acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]...
+               [--run CMD [--dir DIR]] VMLINUX
        acrboot --kconfig    print the kernel options needed to boot under Firecracker
 
 Boot VMLINUX (an uncompressed ELF kernel) in a microVM of its own and show
@@ -68,12 +90,21 @@ device unless --append sets root=.  The VM has no network.  A kernel on its
 own is useful for built-in tests: --append \"kunit_shutdown=reboot\" ends the
 boot after KUnit.
 
+--run CMD boots the kernel on this session's userspace (its root and /usr,
+read-only) and runs CMD as root with sh -c, in a copy of DIR (default .,
+read-write, discarded after) at the same path, with /proc, /sys, /dev,
+/tmp, bpffs, debugfs, tracefs and cgroup2 mounted.  acrboot then exits
+with CMD's status.  E.g. the BPF selftests:
+  acrboot --timeout 3600 --dir tools/testing/selftests/bpf --run './test_progs' vmlinux
+
 The kernel must be the uncompressed ELF vmlinux, configured for Firecracker:
   acrboot --kconfig > acrboot.config
   scripts/kconfig/merge_config.sh -m .config acrboot.config && make olddefconfig
 
 Exit status: 0 the kernel shut the VM down, 1 kernel panic, 124 timeout,
-2 error.  Defaults: 2 CPUs, 1G, 600s (within this VM's CPUs and memory).
+2 error; with --run, CMD's status, or 124 timeout and 125 if the VM ended
+without CMD finishing (a panic).  Defaults: 2 CPUs, 1G, 600s (within this
+VM's CPUs and memory).
 ";
 
 /// What was asked for.
@@ -86,6 +117,18 @@ struct Request {
     append: String,
     disks: Vec<PathBuf>,
     kernel: Option<PathBuf>,
+    /// `--run`: the command, and the directory copied in for it.
+    run: Option<String>,
+    dir: Option<PathBuf>,
+}
+
+/// What a `--run` test VM is to do: written to its spec disk by `acrboot`,
+/// read by [`init`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Spec {
+    cmd: String,
+    /// The directory the copy is mounted on, and the command's cwd.
+    dir: String,
 }
 
 /// Set by SIGINT, SIGTERM or SIGHUP (acrboot interrupted, or the session
@@ -130,6 +173,8 @@ fn parse(args: &[String]) -> Result<Option<Request>> {
                 req.append = if req.append.is_empty() { v } else { format!("{} {v}", req.append) };
             }
             "--disk" => req.disks.push(PathBuf::from(val("--disk")?)),
+            "--run" => req.run = Some(val("--run")?),
+            "--dir" => req.dir = Some(PathBuf::from(val("--dir")?)),
             o if o.starts_with('-') => crate::bail!("unknown option {o}\n{USAGE}"),
             o if req.kernel.is_none() => req.kernel = Some(PathBuf::from(o)),
             o => crate::bail!("unexpected argument {o}\n{USAGE}"),
@@ -137,6 +182,9 @@ fn parse(args: &[String]) -> Result<Option<Request>> {
     }
     if req.kernel.is_none() {
         crate::bail!("no kernel given\n{USAGE}");
+    }
+    if req.dir.is_some() && req.run.is_none() {
+        crate::bail!("--dir goes with --run");
     }
     Ok(Some(req))
 }
@@ -165,29 +213,56 @@ fn run(args: &[String]) -> Result<i32> {
     let mem_mib = req.mem_mib.unwrap_or(1024).clamp(128, max_mem);
     let timeout = req.timeout.unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT);
 
+    let work = std::env::temp_dir().join(format!("acrboot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    crate::util::mkdir_private(&work)?;
+    let _cleanup = RemoveOnDrop(work.clone());
+
     // the test VM: kernel, disks, serial console; nothing else
     let mut cmdline = String::from("console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd");
-    if !disks.is_empty() && !req.append.split_whitespace().any(|a| a.starts_with("root=")) {
+    // (path, read-only), in /dev/vda, /dev/vdb, ... order
+    let mut drives: Vec<(PathBuf, bool)> = vec![];
+    if let Some(cmd) = &req.run {
+        let dir = abs(req.dir.as_deref().unwrap_or(Path::new(".")))?;
+        if !dir.is_dir() {
+            crate::bail!("{}: not a directory", dir.display());
+        }
+        let top = dir.components().nth(1).map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+        if ["usr", "etc", "proc", "sys", "dev", "bin", "sbin", "lib", "lib64", ""].contains(&top.as_str()) {
+            crate::bail!("--dir {}: must be outside /usr, /etc and the system directories", dir.display());
+        }
+        for dev in [DEV_BASE, DEV_USR] {
+            if std::fs::File::open(dev).is_err() {
+                crate::bail!("cannot read {dev}: --run needs a session started by this version of agentcracker");
+            }
+        }
+        let spec = serde_json::to_vec(&Spec { cmd: cmd.clone(), dir: dir.to_string_lossy().into_owned() })?;
+        let mut padded = spec.clone();
+        padded.resize(spec.len().div_ceil(4096).max(1) * 4096, 0);
+        let spec_path = work.join("spec");
+        std::fs::write(&spec_path, padded)?;
+        let copy = work.join("dir.img");
+        copy_dir_image(&dir, &copy)?;
+        drives.extend([(PathBuf::from(DEV_BASE), true), (PathBuf::from(DEV_USR), true), (spec_path, true), (copy, false)]);
+        cmdline.push_str(" root=/dev/vda ro rootfstype=erofs init=/acinit acrboot_run=1");
+    } else if !disks.is_empty() && !req.append.split_whitespace().any(|a| a.starts_with("root=")) {
         cmdline.push_str(" root=/dev/vda rw");
     }
+    drives.extend(disks.iter().map(|d| (d.clone(), false)));
     if !req.append.is_empty() {
         cmdline.push(' ');
         cmdline.push_str(&req.append);
     }
-    let drives: Vec<_> = disks
+    let drives: Vec<_> = drives
         .iter()
         .enumerate()
-        .map(|(i, p)| serde_json::json!({"drive_id": format!("disk{i}"), "path_on_host": p, "is_root_device": false, "is_read_only": false}))
+        .map(|(i, (p, ro))| serde_json::json!({"drive_id": format!("disk{i}"), "path_on_host": p, "is_root_device": false, "is_read_only": ro}))
         .collect();
     let fc_cfg = serde_json::json!({
         "boot-source": {"kernel_image_path": kernel, "boot_args": cmdline},
         "drives": drives,
         "machine-config": {"vcpu_count": cpus, "mem_size_mib": mem_mib, "smt": false},
     });
-    let work = std::env::temp_dir().join(format!("acrboot-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&work);
-    crate::util::mkdir_private(&work)?;
-    let _cleanup = RemoveOnDrop(work.clone());
     let cfg_path = work.join("firecracker.json");
     std::fs::write(&cfg_path, serde_json::to_vec_pretty(&fc_cfg)?)?;
     let fc_log = work.join("firecracker.log");
@@ -230,6 +305,7 @@ fn run(args: &[String]) -> Result<i32> {
     let panic_seen = Arc::new(AtomicBool::new(false));
     let ps = panic_seen.clone();
     let reader = std::thread::spawn(move || {
+        let mut run_status = None;
         let mut buf = vec![0u8; 1 << 16];
         let mut tail: Vec<u8> = vec![];
         let mut kept = 0u64;
@@ -252,12 +328,16 @@ fn run(args: &[String]) -> Result<i32> {
             if contains(&tail, b"Kernel panic - not syncing") {
                 ps.store(true, Ordering::Relaxed);
             }
-            let keep = tail.len().saturating_sub(64);
+            if let Some(st) = run_status_in(&tail) {
+                run_status = Some(st);
+            }
+            let keep = tail.len().saturating_sub(128);
             tail.drain(..keep);
             if stdout_ok && (stdout.write_all(&buf[..n]).is_err() || stdout.flush().is_err()) {
                 stdout_ok = false; // nobody is reading; the record goes on
             }
         }
+        run_status
     });
 
     let deadline = t0 + Duration::from_secs(timeout);
@@ -282,7 +362,7 @@ fn run(args: &[String]) -> Result<i32> {
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let _ = reader.join();
+    let run_status = reader.join().ok().flatten();
     let secs = t0.elapsed().as_secs_f64();
     let (outcome, message) = if panic_seen.load(Ordering::Relaxed) {
         ("panic", None)
@@ -300,8 +380,12 @@ fn run(args: &[String]) -> Result<i32> {
     // `<time> <outcome> <secs> <kernel bytes> <disks> <append>`
     let size = std::fs::metadata(&kernel).map(|m| m.len()).unwrap_or(0);
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(records.join("boot.log")) {
-        let append = req.append.replace('\n', " ");
-        let _ = writeln!(f, "{} {outcome} {secs:.1} {size} {} {append}", crate::util::now(), disks.len());
+        let mut what = req.append.clone();
+        if let Some(cmd) = &req.run {
+            let st = run_status.map_or("unfinished".to_string(), |s| format!("status {s}"));
+            what = format!("{what}{}--run {cmd} ({st})", if what.is_empty() { "" } else { " " });
+        }
+        let _ = writeln!(f, "{} {outcome} {secs:.1} {size} {} {}", crate::util::now(), disks.len(), what.replace('\n', " "));
     }
     eprintln!(
         "acrboot: {} after {secs:.1}s ({cpus} CPU, {mem_mib}M){}",
@@ -313,6 +397,17 @@ fn run(args: &[String]) -> Result<i32> {
         },
         message.map(|m| format!(": {m}")).unwrap_or_default()
     );
+    if req.run.is_some() {
+        return Ok(match (run_status, outcome) {
+            (Some(st), _) => st,
+            (None, "timeout") => 124,
+            (None, "error") => 2,
+            (None, _) => {
+                eprintln!("acrboot: the VM ended before --run finished");
+                125
+            }
+        });
+    }
     Ok(match outcome {
         "exit" => 0,
         "panic" => 1,
@@ -409,4 +504,129 @@ impl Drop for RemoveOnDrop {
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The status in a `--run` VM's console tail, once [`init`] printed it.
+fn run_status_in(tail: &[u8]) -> Option<i32> {
+    let t = String::from_utf8_lossy(tail);
+    let rest = &t[t.rfind(RUN_STATUS)? + RUN_STATUS.len()..];
+    let end = rest.find(['\r', '\n'])?;
+    rest[..end].trim().parse().ok()
+}
+
+/// Make `img`, an ext4 image holding a copy of `dir`, sized to fit.
+fn copy_dir_image(dir: &Path, img: &Path) -> Result<()> {
+    fn walk(p: &Path, bytes: &mut u64, inodes: &mut u64) {
+        let Ok(rd) = std::fs::read_dir(p) else { return };
+        for e in rd.flatten() {
+            *inodes += 1;
+            let Ok(md) = e.metadata() else { continue }; // does not follow symlinks
+            *bytes += md.len().div_ceil(4096) * 4096;
+            if md.is_dir() {
+                walk(&e.path(), bytes, inodes);
+            }
+        }
+    }
+    let (mut bytes, mut inodes) = (0, 1);
+    walk(dir, &mut bytes, &mut inodes);
+    eprintln!("acrboot: copying {} ({}, {inodes} files) into the test VM", dir.display(), crate::util::human_bytes(bytes));
+    let size_mib = (bytes + bytes / 4 + inodes * 512) / (1 << 20) + 64;
+    let n = (inodes + inodes / 4 + 1024).to_string();
+    crate::images::mkfs_ext4(img, &format!("{size_mib}M"), "acrrun", &["-d".as_ref(), dir.as_os_str(), "-N".as_ref(), n.as_ref()])
+}
+
+/// PID 1 of a `--run` test VM (see the module docs): set up, run the
+/// command, report its status, reset the VM.
+pub fn init() -> ! {
+    if let Err(e) = init_run() {
+        println!("acrboot: --run could not start: {e}");
+    }
+    let _ = io::stdout().flush();
+    unsafe {
+        libc::sync();
+        libc::reboot(libc::RB_AUTOBOOT);
+    }
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Spec disk and the copy of the directory, after the base and `/usr`.
+const DEV_SPEC: &str = "/dev/vdc";
+const DEV_DIR: &str = "/dev/vdd";
+
+fn init_run() -> Result<()> {
+    fn mnt(src: &str, tgt: &str, fstype: &str, flags: libc::c_ulong, data: &str) -> Result<()> {
+        let _ = std::fs::create_dir_all(tgt);
+        let c = |s: &str| std::ffi::CString::new(s).unwrap();
+        let (s, t, f, d) = (c(src), c(tgt), c(fstype), c(data));
+        if unsafe { libc::mount(s.as_ptr(), t.as_ptr(), f.as_ptr(), flags, d.as_ptr().cast()) } != 0 {
+            crate::bail!("mount {src} on {tgt} ({fstype}): {}", io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    let _ = mnt("proc", "/proc", "proc", 0, "");
+    let _ = mnt("sysfs", "/sys", "sysfs", 0, "");
+    let _ = mnt("devtmpfs", "/dev", "devtmpfs", 0, ""); // usually there already
+    let _ = mnt("devpts", "/dev/pts", "devpts", 0, "mode=620,ptmxmode=666");
+    let _ = mnt("tmpfs", "/dev/shm", "tmpfs", 0, "mode=1777");
+    mnt(DEV_USR, "/usr", "erofs", libc::MS_RDONLY, "")?;
+    for (d, mode) in [("/tmp", "1777"), ("/run", "755"), ("/root", "700"), ("/var", "755")] {
+        let _ = mnt("tmpfs", d, "tmpfs", 0, &format!("mode={mode}"));
+    }
+    // a writable /var as distributions lay it out (`ip netns` uses /var/run/netns)
+    let _ = std::os::unix::fs::symlink("../run", "/var/run");
+    let _ = std::os::unix::fs::symlink("../run/lock", "/var/lock");
+    for d in ["/var/tmp", "/var/lib", "/var/log", "/var/cache", "/run/lock"] {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::set_permissions("/var/tmp", std::os::unix::fs::PermissionsExt::from_mode(0o1777));
+    let mut raw = vec![0u8; 64 << 10];
+    let n = std::fs::File::open(DEV_SPEC).and_then(|mut f| f.read(&mut raw)).ctx("reading the spec disk")?;
+    raw.truncate(n);
+    let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let spec: Spec = serde_json::from_slice(&raw[..len])?;
+    // the copy at the same path: the base image is read-only, so a tmpfs
+    // goes over the top directory first (empty in the base: /home, /opt, ...)
+    let top = Path::new(&spec.dir).components().nth(1).map(|c| format!("/{}", c.as_os_str().to_string_lossy())).unwrap_or_default();
+    if !["/tmp", "/run", "/root", "/var"].contains(&top.as_str()) {
+        mnt("tmpfs", &top, "tmpfs", 0, "mode=755")?;
+    }
+    mnt(DEV_DIR, &spec.dir, "ext4", 0, "")?;
+    // what test suites expect; a kernel without them just goes without
+    for (src, tgt, fstype) in [
+        ("bpf", "/sys/fs/bpf", "bpf"),
+        ("debugfs", "/sys/kernel/debug", "debugfs"),
+        ("tracefs", "/sys/kernel/tracing", "tracefs"),
+        ("cgroup2", "/sys/fs/cgroup", "cgroup2"),
+        ("securityfs", "/sys/kernel/security", "securityfs"),
+    ] {
+        let _ = mnt(src, tgt, fstype, 0, "");
+    }
+    unsafe {
+        let unlimited = libc::rlimit { rlim_cur: libc::RLIM_INFINITY, rlim_max: libc::RLIM_INFINITY };
+        libc::setrlimit(libc::RLIMIT_MEMLOCK, &unlimited);
+        libc::sethostname(c"acrboot".as_ptr(), 7);
+    }
+    let env = [
+        ("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"),
+        ("HOME", "/root"),
+        ("USER", "root"),
+        ("TERM", "linux"),
+        ("LANG", "C.UTF-8"),
+    ];
+    let _ = Command::new("ip").args(["link", "set", "dev", "lo", "up"]).env_clear().envs(env).status();
+    let st = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&spec.cmd)
+        .current_dir(&spec.dir)
+        .env_clear()
+        .envs(env)
+        .stdin(Stdio::null())
+        .status()
+        .ctx("running /bin/sh")?;
+    use std::os::unix::process::ExitStatusExt;
+    let code = st.code().unwrap_or_else(|| 128 + st.signal().unwrap_or(0));
+    println!("\n{RUN_STATUS}{code}");
+    Ok(())
 }

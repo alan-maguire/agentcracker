@@ -1030,6 +1030,12 @@ fn gc_lower(dir: &Path) {
 /// Returns an error if `mkfs.ext4` cannot be run (e2fsprogs missing) or
 /// fails.
 pub fn create_disk(path: &Path, size_gib: u64, label: &str) -> Result<()> {
+    mkfs_ext4(path, &format!("{size_gib}G"), label, &[])
+}
+
+/// Make ext4 image `path` of `size` (an `mkfs.ext4` size, e.g. `512M`)
+/// labelled `label`, with `extra` options (e.g. `-d DIR` to fill it).
+pub fn mkfs_ext4(path: &Path, size: &str, label: &str, extra: &[&std::ffi::OsStr]) -> Result<()> {
     // mkfs.ext4 lives in sbin, which is often not on an ordinary user's PATH
     // (Debian and Ubuntu); and some versions announce "Creating regular
     // file" on stdout even with -q, which must not mix with the command's
@@ -1043,8 +1049,9 @@ pub fn create_disk(path: &Path, size_gib: u64, label: &str) -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("mkfs.ext4"));
     let out = std::process::Command::new(&mkfs)
         .args(["-q", "-F", "-m", "0", "-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1", "-L", label])
+        .args(extra)
         .arg(path)
-        .arg(format!("{size_gib}G"))
+        .arg(size)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .output()

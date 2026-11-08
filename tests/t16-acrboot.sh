@@ -69,6 +69,19 @@ else
     info "no base image in the cache: root disk not tested"
 fi
 
+step "--run: a command on the session's userspace"
+mkdir -p sub && echo data > sub/f
+ac_run sh -c 'acrboot --dir sub --run "pwd; cat f; id -u; command -v sh; mount | grep -c \" /sys/fs/bpf \"; echo new > g; exit 7" vmlinux 2>&1 | grep -v "^\[ *[0-9.]*\] " | tr -d "\r"; ls sub'
+assert_contains "$AC_OUT" "$PWD/sub" "it runs in a copy of the directory, at the same path"
+assert_contains "$AC_OUT" "$(printf 'data\n0')" "which it can read, as root"
+assert_match "$AC_OUT" $'\n/usr/s?bin/sh\n1\n' "with the session's /usr and bpffs mounted"
+assert_contains "$AC_OUT" "acrboot: --run exited with status 7" "the command's status is reported"
+assert_eq "$(echo "$AC_OUT" | tail -1)" "f" "and the copy's changes are discarded"
+ac_run sh -c 'acrboot --dir sub --run "exit 7" vmlinux >/dev/null 2>&1; echo rc=$?'
+assert_eq "$AC_OUT" "rc=7" "acrboot exits with it"
+ac_run sh -c 'acrboot --run true --dir /usr vmlinux; echo rc=$?'
+assert_contains "$AC_OUT$AC_ERR" "must be outside /usr" "system directories are refused"
+
 step "timeouts and limits"
 ac_run sh -c 'acrboot --timeout 3 --cpus 99 --mem 64G --append "root=/dev/vdz rootwait" vmlinux >/dev/null; echo rc=$?'
 assert_eq "$AC_OUT" "rc=124" "a kernel that never finishes times out with 124"

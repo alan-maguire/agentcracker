@@ -491,6 +491,20 @@ shutdown sends SIGTERM), and appends the outcome to `boot.log`, both in
 paths).  CPUs and memory are clamped to the guest's (memory less
 `RESERVE_MIB`).
 
+`--run` attaches the session's base and `/usr` images (`/dev/vda`,
+`/dev/vdb` in the guest, which acinit makes readable with `boot`) as the
+test VM's read-only `vda` and `vdb`, a spec disk (`Spec` as JSON, padded
+to 4K) as `vdc`, and an ext4 copy of `--dir` (`copy_dir_image`, via
+`images::mkfs_ext4 -d`) as `vdd`; the command line adds
+`root=/dev/vda ro rootfstype=erofs init=/acinit acrboot_run=1`.  The
+kernel hands `acrboot_run=1` to init as an environment variable, so
+`main` runs `acrboot::init` instead of `guest::main`: it mounts the usual
+filesystems, `/usr`, tmpfs over `/tmp`, `/run`, `/root`, `/var` (with `/var/run` -> `/run`) and
+the top directory of `--dir` (the base image is read-only), the copy,
+bpffs, debugfs, tracefs, cgroup2 and securityfs (each optional), lifts
+`RLIMIT_MEMLOCK`, brings up `lo`, runs `sh -c CMD` as root and prints
+`RUN_STATUS` with the status, which `acrboot` finds in the console.
+
 ### `buildcache.rs`
 
 `attach` takes a project's cache for one boot (creating `cache.img` with

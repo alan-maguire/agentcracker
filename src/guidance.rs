@@ -155,7 +155,33 @@ give it an init (`--append init=/path`).  Have the init end with a reboot
 (`reboot -f`, or `echo b > /proc/sysrq-trigger`): the VM stops when the
 kernel resets it.
 
-## 4. When it panics
+## 4. Run tests on this session's userspace (`--run`)
+
+`--run CMD` boots the kernel on this VM's own root and `/usr`, read-only,
+with a copy of `--dir DIR` (default `.`) at the same path, and runs CMD
+there as root (`sh -c`), with bpffs, debugfs, tracefs and cgroup2
+mounted.  `acrboot` exits with CMD's status.  No root disk to build: the
+binaries run against the libraries they were built with.  Keep DIR small
+(it is copied); writes in it are discarded.  For the BPF selftests
+(`tools/testing/selftests/bpf/vmtest.sh` cannot run here - it needs QEMU
+and sudo):
+
+```
+B=tools/testing/selftests/bpf; cat $B/config $B/config.vm $B/config.x86_64 > $O/.config
+acrboot --kconfig > acrboot.config
+scripts/kconfig/merge_config.sh -m -O $O $O/.config acrboot.config
+make O=$O olddefconfig && make O=$O -j$(nproc)
+make -C tools/testing/selftests/bpf KBUILD_OUTPUT=$O -j$(nproc)
+acrboot --cpus {vcpus} --timeout 3600 --dir tools/testing/selftests/bpf \
+  --run './test_progs -j > /tmp/out 2>&1; rc=$?; grep -E "^(Summary|#.*FAIL)" /tmp/out; exit $rc' $O/vmlinux
+```
+
+(`O` out of tree in `~/.cache`; `make O=` refuses a source tree that has
+an in-tree build, so build from a clean checkout or `git clone --shared`.)
+Run a subset with `./test_progs -t NAME`.  Tests that need hardware
+performance counters fail here: the test VM has no PMU.
+
+## 5. When it panics
 
 `acrboot` exits 1 and stops the VM a few seconds after the report.  Decode
 the trace against your build:

@@ -846,7 +846,13 @@ fn run() -> Result<()> {
     // otherwise (devtmpfs makes it root's, 0600, and nothing here runs as
     // root after this)
     if cfg.boot {
-        let _ = std::fs::set_permissions("/dev/kvm", std::os::unix::fs::PermissionsExt::from_mode(0o666));
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions("/dev/kvm", PermissionsExt::from_mode(0o666));
+        // the base and /usr images, read-only, for `acrboot --run` (the
+        // user can read every file on them anyway)
+        for dev in [crate::acrboot::DEV_BASE, cfg.dev_usr.as_str()] {
+            let _ = std::fs::set_permissions(dev, PermissionsExt::from_mode(0o644));
+        }
     } else {
         let _ = std::fs::remove_file("/dev/kvm");
     }

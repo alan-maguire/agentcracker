@@ -312,18 +312,32 @@ gets nested virtualisation (`/dev/kvm`, with the host's VMX or SVM passed
 through) and an `acrboot` command:
 
 ```
-acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]... VMLINUX
+acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]...
+        [--run CMD [--dir DIR]] VMLINUX
 ```
 
 It boots the kernel in a Firecracker microVM of its own, inside the
 session's, and shows the serial console; `acrboot` exits 0 when the
 kernel shut the VM down, 1 on a panic, 124 on a timeout, 2 on an error.
-Two uses:
+Three uses:
 
 ```
 acrboot --append "kunit.filter_glob=list* kunit_shutdown=reboot" vmlinux   # built-in KUnit suites
 acrboot --disk rootfs.img vmlinux                                          # a root disk (/dev/vda)
+acrboot --timeout 3600 --dir tools/testing/selftests/bpf --run ./test_progs vmlinux   # selftests
 ```
+
+`--run CMD` needs no root filesystem: the test VM boots on the session's
+own userspace (its root and `/usr` images, read-only), with a copy of
+`DIR` (default `.`) at the same path, read-write and discarded after.
+acinit is its init: it mounts `/proc`, `/sys`, `/dev`, tmpfs on `/tmp`
+and friends, bpffs, debugfs, tracefs and cgroup2, brings up `lo`, runs
+`CMD` as root with `sh -c` in `DIR`, and `acrboot` exits with its
+status (124 on a timeout, 125 if the VM ended without it finishing).
+So the BPF selftests run as built, against the libraries they were
+built with - `vmtest.sh` itself cannot run in a session (it wants QEMU,
+a downloaded root filesystem and `sudo`).  The kernel needs EROFS,
+ext4 and tmpfs, which `acrboot --kconfig` includes.
 
 - **The kernel** must be the uncompressed ELF `vmlinux` (Firecracker does
   not boot a `bzImage`) with the options Firecracker needs (virtio-mmio,
