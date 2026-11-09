@@ -117,5 +117,11 @@ assert_no_file "$(session_dir "$SID")/changes.stream.tmp" "and what was received
 unset AGENTCRACKER_MIN_FREE
 ac resume "$SID" true
 assert_contains "$AC_ERR" "1 file changed: 1 added" "resumed with room, the session's changes come through"
+export AGENTCRACKER_MIN_FREE_SESSION=$((1 << 62))
+ac_run true
+assert_rc 1 "a session does not start on a nearly full disk"
+assert_contains "$AC_ERR" "free on the disk holding sessions" "saying why"
+unset AGENTCRACKER_MIN_FREE_SESSION
+# (stopping a running session that gets there: a unit test, vm.rs)
 
 finish

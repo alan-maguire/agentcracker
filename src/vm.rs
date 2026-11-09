@@ -320,6 +320,36 @@ extern "C" fn on_term(_: libc::c_int) {
     }
 }
 
+/// Stop the session, as `agentcracker stop` does (through [`TERM_FD`]), if
+/// the disk holding it gets below [`crate::util::MIN_FREE`] free while it
+/// runs: its scratch disk and the build cache are sparse files the guest
+/// grows as it writes, and nothing else bounds them by the host's free
+/// space.  Its changes stay on its disk (the export is refused too, see
+/// [`attach`]) for a later `resume`.  Checks every two seconds until the
+/// returned flag is cleared.  `file`: a file on the session's disk (its
+/// `meta.json`); `tty`: the terminal is in raw mode.
+fn watch_space(file: &Path, tty: bool) -> Arc<std::sync::atomic::AtomicBool> {
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flag = on.clone();
+    let Ok(meta) = std::fs::File::open(file) else { return on };
+    std::thread::spawn(move || {
+        while flag.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_secs(2));
+            if crate::util::free_space(meta.as_raw_fd()).is_some_and(|f| f < crate::util::min_free_session()) && flag.load(Ordering::Relaxed) {
+                let nl = if tty { "\r\n" } else { "\n" };
+                eprint!(
+                    "{nl}agentcracker: less than {} free on the disk holding the session: stopping it \
+                     (free some space, then `agentcracker resume` it){nl}",
+                    crate::util::human_bytes(crate::util::min_free_session())
+                );
+                on_term(libc::SIGTERM);
+                break;
+            }
+        }
+    });
+    on
+}
+
 extern "C" fn on_winch(_: libc::c_int) {
     let fd = WINCH_FD.load(Ordering::Relaxed);
     if fd >= 0 {
@@ -748,6 +778,7 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
         sa.sa_sigaction = on_term as *const () as usize;
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
+    let watching = watch_space(&s.path("meta.json"), tty);
     let mut raw = if tty { RawTerm::enter() } else { None };
     let pump = stdin_pump(ctrl.clone(), stop_r, winch_r, term_r);
     let stop_pump = |raw: &mut Option<RawTerm>| {
@@ -856,6 +887,7 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
     }
     stop_pump(&mut raw);
     let _ = pump.join();
+    watching.store(false, Ordering::Relaxed);
     WINCH_FD.store(-1, Ordering::Relaxed);
     TERM_FD.store(-1, Ordering::Relaxed);
     unsafe {
@@ -1043,5 +1075,25 @@ mod tests {
         assert!(got.ends_with(note), "and the cut is noted");
         assert_eq!(got.len() as u64, 13 + CONSOLE_MAX + 1 + note.len() as u64);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_is_stopped_when_its_disk_gets_full() {
+        let f = std::env::temp_dir().join(format!("ac-space-test-{}", std::process::id()));
+        std::fs::write(&f, b"{}").unwrap();
+        // a floor no disk meets; the stop goes where SIGTERM's would
+        unsafe { std::env::set_var("AGENTCRACKER_MIN_FREE_SESSION", (1u64 << 62).to_string()) };
+        let (r, w) = std::io::pipe().unwrap();
+        TERM_FD.store(w.as_raw_fd(), Ordering::Relaxed);
+        let on = watch_space(&f, false);
+        let mut r = r;
+        let mut b = [0u8; 1];
+        use std::io::Read;
+        r.read_exact(&mut b).unwrap();
+        assert_eq!(&b, b"t", "the session is asked to stop");
+        on.store(false, Ordering::Relaxed);
+        TERM_FD.store(-1, Ordering::Relaxed);
+        unsafe { std::env::remove_var("AGENTCRACKER_MIN_FREE_SESSION") };
+        let _ = std::fs::remove_file(&f);
     }
 }

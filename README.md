@@ -464,11 +464,15 @@ Without `--branch`, the commits are imported as `agentcracker/<id>`
 - **The first snapshot of a large tree** takes a while, especially
   without reflinks (see Quick start).
 - **Disk space**: sessions and build caches are kept until you remove
-  them, and each can grow to tens of GB.  What the guest sends the host
-  - its changes, its state, its console, its output when that goes to a
-  file - stops before the disk has less than 2G free (the session then
-  says so, and resuming it once there is room gets its changes); after a
-  session agentcracker warns when under 10G is left.
+  them, and each can grow to tens of GB: a session's disk and a
+  project's build cache are 64G sparse files that take real space as
+  the guest writes to them.  agentcracker keeps 2G free on the disk that
+  holds them: a session does not start below that, a running one is
+  stopped when it gets there, and what the guest sends the host - its
+  changes, state, console, output to a file - stops there too.  The
+  changes stay on the session's disk; resuming it once there is room
+  gets them.  It also warns, before and after a session, when under 10G
+  is left.
 - **Not implemented**: a live read-only share of the project, a real
   network device, three-way merges on apply, pre-booted VM snapshots
   for faster start.

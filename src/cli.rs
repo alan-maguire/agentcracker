@@ -471,6 +471,20 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
             format!("net: {} + {}", profile.api, extra.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
         }
     };
+    // its disks grow on the host's as the guest writes (see vm::watch_space)
+    if let Some(free) = std::fs::File::open(s.path("meta.json")).ok().and_then(|f| {
+        use std::os::fd::AsRawFd;
+        crate::util::free_space(f.as_raw_fd())
+    }) {
+        if free < crate::util::min_free_session() {
+            crate::bail!(
+                "only {} free on the disk holding sessions; free some space first \
+                 (`agentcracker ls` and `rm`, `agentcracker cache --drop`)",
+                human_bytes(free)
+            );
+        }
+    }
+    low_space_warning(s);
     status(&format!("session {} · {} vCPU · {} · {}", s.meta.id, s.meta.vcpus, human_bytes(s.meta.mem_mib << 20), net));
     s.meta.status = "running".into();
     s.meta.error = None;

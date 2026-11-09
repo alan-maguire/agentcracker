@@ -616,13 +616,22 @@ pub fn git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
 /// Space kept free on any filesystem the host writes guest-driven output
 /// to (a session's change and state streams, its console log, the
 /// command's output when that goes to a file): writing stops below it, so
-/// a runaway or hostile guest cannot fill the host's disk.  The tests
-/// raise it with `AGENTCRACKER_MIN_FREE` (bytes) to see it work.
+/// a runaway or hostile guest cannot fill the host's disk.  The same floor
+/// applies to the session's own disks, which the guest grows by writing to
+/// them: a session does not start below it, and is stopped if it gets
+/// there (see `vm::watch_space`).  The tests raise each separately, with
+/// `AGENTCRACKER_MIN_FREE` and `AGENTCRACKER_MIN_FREE_SESSION` (bytes), to
+/// see them work.
 pub const MIN_FREE: u64 = 2 << 30;
 
-/// [`MIN_FREE`], or `AGENTCRACKER_MIN_FREE` if set.
-fn min_free() -> u64 {
+/// [`MIN_FREE`] for files the host writes, or `AGENTCRACKER_MIN_FREE`.
+pub fn min_free() -> u64 {
     std::env::var("AGENTCRACKER_MIN_FREE").ok().and_then(|v| v.parse().ok()).unwrap_or(MIN_FREE)
+}
+
+/// [`MIN_FREE`] for the session's disks, or `AGENTCRACKER_MIN_FREE_SESSION`.
+pub fn min_free_session() -> u64 {
+    std::env::var("AGENTCRACKER_MIN_FREE_SESSION").ok().and_then(|v| v.parse().ok()).unwrap_or(MIN_FREE)
 }
 
 /// Bytes the user can still write on the filesystem holding `fd`, or
