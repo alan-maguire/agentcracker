@@ -392,7 +392,10 @@ Does not protect against:
   allowlisted endpoint;
 - misuse of the API credential it was given;
 - the human applying a bad change without reading the diff - the
-  review step is a real decision, not a formality.
+  review step is a real decision, not a formality;
+- trusting the agent's account of its work: its transcripts and test
+  results are written inside the VM, by an environment it controls, so
+  only the proxy's network log is the host's own observation.
 
 ## Related work: other ways to sandbox an agent
 

@@ -97,7 +97,12 @@ subcommand.
 - **Watch it.**  `log` is one timeline of the session's network
   requests, the agent's tool calls and its test kernel boots - while it
   runs too (`log -f` follows it).  `show` summarises a session: changes,
-  network activity per host, transcripts, disk use.
+  network activity per host, transcripts, disk use.  Only the network
+  requests are seen by the host (its proxy); the tool calls and boots
+  come from files inside the VM - the agent's transcripts and
+  `boot.log` - which an agent that meant to could rewrite.  `log` is
+  the record of an honest agent's work, not an audit trail against a
+  hostile one.
 - **Several at once.**  `--detach`, `wait`, `stop` and `--json` let
   scripts run several agents at once, each in its own VM, against the
   same tree, and compare their results; applying always stays a
@@ -393,6 +398,13 @@ fix, rebuild (incremental), and run it again, then the whole suite for
 regressions.  Each boot is a `boot` line in `agentcracker log`, with its
 console kept in the session, so you can check what the agent ran and
 what it saw before you `apply` its change.
+
+The results are the agent's account, though: it controlled the
+environment they ran in, including a `~/.cache` that earlier sessions
+wrote to (a stale object or ccache entry can make a build test
+something other than the source).  For a fix that matters, rerun the
+key tests yourself from a clean build - on the host, or in a fresh
+session after `agentcracker cache --drop`.
 
 **What differs from `vmtest.sh` and CI.**
 

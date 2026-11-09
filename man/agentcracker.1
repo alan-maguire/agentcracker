@@ -193,6 +193,10 @@ out of its VM, through the same connection as
 With
 .BR \-\-json ,
 one object per event.  All text is the agent's and is shown escaped.
+Only the network requests are observed by the host; the tool calls and
+test boots come from files inside the VM, which the agent could rewrite,
+so the log records an honest agent's work but is no audit trail against
+a hostile one.
 .TP
 .BR diff " [\fB\-\-ignored\fR] [\fIsession\fR]"
 Show the session's changes as a unified diff against the current host
