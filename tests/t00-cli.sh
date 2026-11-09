@@ -24,6 +24,14 @@ assert_rc 1 "--allow without a host fails"
 ac rm
 assert_rc 1 "rm without a session fails"
 
+step "subcommands check their arguments"
+ac branch deadbeef extra
+assert_rc 1 "an extra argument fails"
+assert_contains "$AC_ERR" "branch: unexpected argument extra" "naming the subcommand and the argument"
+ac log --bogus
+assert_rc 1 "an unknown option fails"
+assert_contains "$AC_ERR" "log: unknown option --bogus" "naming the subcommand and the option"
+
 step "empty session store"
 mkdir -p "$WORK/empty" && cd "$WORK/empty"
 ac ls

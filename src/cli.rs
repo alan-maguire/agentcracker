@@ -150,6 +150,51 @@ fn cwd() -> Result<PathBuf> {
     Ok(c.canonicalize().unwrap_or(c))
 }
 
+/// A subcommand's parsed arguments (see [`parse_args`]).
+struct Args {
+    /// The options given, each by its last spelling (`--follow` for `-f`).
+    flags: Vec<&'static str>,
+    /// The other arguments, in order.
+    pos: Vec<String>,
+}
+
+impl Args {
+    /// Whether option `f` (its last spelling) was given.
+    fn has(&self, f: &str) -> bool {
+        self.flags.contains(&f)
+    }
+
+    /// The first other argument: a session id prefix, for most commands.
+    fn first(&self) -> Option<&str> {
+        self.pos.first().map(|s| s.as_str())
+    }
+}
+
+/// Parse the arguments of subcommand `cmd` (everything after its name),
+/// for subcommands other than `run`, `resume` and `shell` (which stop at
+/// the command to run: [`parse_opts`]).
+///
+/// `flags`: the options it takes, each with its spellings separated by
+/// `|` (`"-f|--follow"`); `max`: how many other arguments it takes, in any
+/// position.  Errors, naming `cmd`, for any other option or for too many
+/// arguments.
+fn parse_args(cmd: &str, args: &[String], flags: &[&'static str], max: usize) -> Result<Args> {
+    let mut a = Args { flags: vec![], pos: vec![] };
+    for arg in args {
+        if arg.starts_with('-') && arg.len() > 1 {
+            let Some(f) = flags.iter().find(|f| f.split('|').any(|s| s == arg)) else {
+                crate::bail!("{cmd}: unknown option {arg} (see agentcracker --help)");
+            };
+            a.flags.push(f.rsplit('|').next().unwrap_or(f));
+        } else if a.pos.len() < max {
+            a.pos.push(arg.clone());
+        } else {
+            crate::bail!("{cmd}: unexpected argument {arg} (see agentcracker --help)");
+        }
+    }
+    Ok(a)
+}
+
 /// Dispatch the command line.
 ///
 /// `args`: the full argument vector, including the program name.  A known
@@ -183,7 +228,7 @@ pub fn run(args: Vec<String>) -> Result<i32> {
         "stop" => cmd_stop(rest),
         "diff" => cmd_diff(rest),
         "apply" => cmd_apply(rest),
-        "branch" => cmd_branch(rest.first().map(|s| s.as_str())),
+        "branch" => cmd_branch(rest),
         "resume" => cmd_resume(rest, false),
         "shell" => cmd_resume(rest, true),
         "rm" | "discard" => cmd_rm(rest),
@@ -765,10 +810,7 @@ fn status_of(s: &Session) -> String {
 /// `agentcracker ls`: print a table of all sessions - id, age, status,
 /// change counts, directory and command - oldest first.  Returns 0.
 fn cmd_ls(args: &[String]) -> Result<i32> {
-    let (json, rest) = split_json(args);
-    if let Some(a) = rest.first() {
-        crate::bail!("ls takes no arguments (got {a:?})");
-    }
+    let json = parse_args("ls", args, &["--json"], 0)?.has("--json");
     let all = session::list();
     if json {
         out!("{}", serde_json::to_string_pretty(&all.iter().map(session_brief).collect::<Vec<_>>())?);
@@ -805,8 +847,9 @@ fn cmd_ls(args: &[String]) -> Result<i32> {
 /// `arg`: optional session id prefix.  Returns 0; errors if the session
 /// cannot be found.
 fn cmd_show(args: &[String]) -> Result<i32> {
-    let (json, rest) = split_json(args);
-    let s = session::find(rest.first().map(|a| a.as_str()), &cwd()?)?;
+    let a = parse_args("show", args, &["--json"], 1)?;
+    let json = a.has("--json");
+    let s = session::find(a.first(), &cwd()?)?;
     if json {
         out!("{}", serde_json::to_string_pretty(&session_json(&s))?);
         return Ok(0);
@@ -907,22 +950,6 @@ fn load_cs(s: &Session) -> Result<ChangeSet> {
     ChangeSet::load(s)?.ctx(format!("session {} has no change record (resume it and exit cleanly)", s.meta.id))
 }
 
-/// Split `--ignored` off the arguments of `diff` and `apply`.  Returns
-/// whether it was given and the session id prefix, if any.
-fn ignored_arg(args: &[String]) -> Result<(bool, Option<&str>)> {
-    let mut ig = false;
-    let mut id = None;
-    for a in args {
-        match a.as_str() {
-            "--ignored" => ig = true,
-            o if o.starts_with('-') => crate::bail!("unknown option {o}"),
-            o if id.is_none() => id = Some(o),
-            o => crate::bail!("unexpected argument {o}"),
-        }
-    }
-    Ok((ig, id))
-}
-
 /// Say how many ignored changes `cs` leaves out, if any, and how to get them.
 fn ignored_note(cs: &ChangeSet, cmd: &str) {
     let n = cs.ignored_count();
@@ -936,8 +963,8 @@ fn ignored_note(cs: &ChangeSet, cmd: &str) {
 /// `--ignored` (include changes git ignores) and an optional session id
 /// prefix.  Returns 0.
 fn cmd_diff(args: &[String]) -> Result<i32> {
-    let (ig, arg) = ignored_arg(args)?;
-    let s = session::find(arg, &cwd()?)?;
+    let a = parse_args("diff", args, &["--ignored"], 1)?;
+    let (ig, s) = (a.has("--ignored"), session::find(a.first(), &cwd()?)?);
     let mut cs = load_cs(&s)?;
     cs.include_ignored = ig;
     if cs.is_empty() {
@@ -961,8 +988,8 @@ fn cmd_diff(args: &[String]) -> Result<i32> {
 /// `args`: `--ignored` (apply changes git ignores too) and an optional
 /// session id prefix.  Returns 0, or 1 if the user declined to apply again.
 fn cmd_apply(args: &[String]) -> Result<i32> {
-    let (ig, arg) = ignored_arg(args)?;
-    let mut s = session::find(arg, &cwd()?)?;
+    let a = parse_args("apply", args, &["--ignored"], 1)?;
+    let (ig, mut s) = (a.has("--ignored"), session::find(a.first(), &cwd()?)?);
     if s.is_running() {
         crate::bail!("session {} is still running", s.meta.id);
     }
@@ -989,8 +1016,9 @@ fn cmd_apply(args: &[String]) -> Result<i32> {
 /// `agentcracker branch [SESSION]`: import the agent's commits as the
 /// branch `agentcracker/<id>` (see [`gitimport::import_branch`]) and record it
 /// in the session.  `arg`: optional session id prefix.  Returns 0.
-fn cmd_branch(arg: Option<&str>) -> Result<i32> {
-    let mut s = session::find(arg, &cwd()?)?;
+fn cmd_branch(args: &[String]) -> Result<i32> {
+    let a = parse_args("branch", args, &[], 1)?;
+    let mut s = session::find(a.first(), &cwd()?)?;
     let cs = load_cs(&s)?;
     let (b, desc) = gitimport::import_branch(&cs, &s)?;
     status(&format!("created branch {b} ({desc})"));
@@ -1003,11 +1031,12 @@ fn cmd_branch(arg: Option<&str>) -> Result<i32> {
 /// stopping at the first that cannot be found or is still running.
 /// Returns 0.
 fn cmd_rm(args: &[String]) -> Result<i32> {
+    let args = parse_args("rm", args, &[], usize::MAX)?.pos;
     if args.is_empty() {
         crate::bail!("usage: agentcracker rm SESSION...");
     }
     let cwd = cwd()?;
-    for a in args {
+    for a in &args {
         let s = session::find(Some(a), &cwd)?;
         let id = s.meta.id.clone();
         s.remove()?;
@@ -1020,8 +1049,9 @@ fn cmd_rm(args: &[String]) -> Result<i32> {
 /// (size, last use, directory), or delete the one for DIR (default: the
 /// current directory).  Returns 0, or 1 if there was no cache to drop.
 fn cmd_cache(args: &[String]) -> Result<i32> {
-    match args {
-        [] => {
+    let a = parse_args("cache", args, &["--drop"], 1)?;
+    match (a.has("--drop"), a.first()) {
+        (false, None) => {
             let all = crate::buildcache::list();
             if all.is_empty() {
                 eprintln!("no build caches yet (a session's ~/.cache becomes its directory's build cache)");
@@ -1035,8 +1065,8 @@ fn cmd_cache(args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
-        [d] | [d, _] if d == "--drop" => {
-            let dir = match args.get(1) {
+        (true, dir) => {
+            let dir = match dir {
                 Some(p) => std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p)),
                 None => cwd()?,
             };
@@ -1048,7 +1078,7 @@ fn cmd_cache(args: &[String]) -> Result<i32> {
                 Ok(1)
             }
         }
-        _ => crate::bail!("usage: agentcracker cache [--drop [DIR]]"),
+        (false, Some(_)) => crate::bail!("usage: agentcracker cache [--drop [DIR]]"),
     }
 }
 
@@ -1060,7 +1090,8 @@ fn cmd_cache(args: &[String]) -> Result<i32> {
 /// snapshot stale: it builds only the /usr image, quietly.  `args`: the
 /// arguments after `refresh`.  Returns 0.
 fn cmd_refresh(args: &[String]) -> Result<i32> {
-    let bg = args.iter().any(|a| a == "--background");
+    // (--background: the detached rebuild a session starts)
+    let bg = parse_args("refresh", args, &["--background"], 0)?.has("--background");
     let cwd = cwd()?;
     let cfg = Config::load(&cwd)?;
     images::usr_image(&cfg, if bg { Refresh::Background } else { Refresh::Force })?;
@@ -1081,13 +1112,6 @@ fn cmd_refresh(args: &[String]) -> Result<i32> {
 /// Version of the `--json` output.  Adding fields keeps it; removing or
 /// changing the meaning of one bumps it.
 const JSON_FORMAT: u32 = 1;
-
-/// Split `--json` out of a subcommand's arguments.  Returns whether it was
-/// there, and the remaining arguments.
-fn split_json(args: &[String]) -> (bool, Vec<String>) {
-    let json = args.iter().any(|a| a == "--json");
-    (json, args.iter().filter(|a| *a != "--json").cloned().collect())
-}
 
 /// The status word `ls` shows, plus whether a VM is running.
 fn status_json(s: &Session) -> (String, bool) {
@@ -1236,8 +1260,9 @@ fn sessions_from(args: &[String]) -> Result<Vec<Session>> {
 /// Returns the command's exit status for a single session; for several, 0
 /// if every one exited 0 and 1 otherwise.
 fn cmd_wait(args: &[String]) -> Result<i32> {
-    let (json, rest) = split_json(args);
-    let all = sessions_from(&rest)?;
+    let a = parse_args("wait", args, &["--json"], usize::MAX)?;
+    let json = a.has("--json");
+    let all = sessions_from(&a.pos)?;
     let (tx, rx) = std::sync::mpsc::channel();
     for s in &all {
         let (lock, dir) = (s.path("lock"), s.dir.clone());
@@ -1277,7 +1302,7 @@ fn cmd_wait(args: &[String]) -> Result<i32> {
 /// session then exports its changes and ends as usual.  Waits up to 30 s
 /// for each.  Returns 0 if every session is stopped (or was not running).
 fn cmd_stop(args: &[String]) -> Result<i32> {
-    let all = sessions_from(args)?;
+    let all = sessions_from(&parse_args("stop", args, &[], usize::MAX)?.pos)?;
     let mut ok = true;
     for s in &all {
         let id = &s.meta.id;
@@ -1323,13 +1348,9 @@ fn cmd_stop(args: &[String]) -> Result<i32> {
 fn cmd_log(args: &[String]) -> Result<i32> {
     use crate::activity::{self, Event};
     use std::time::{Duration, Instant};
-    let (json, rest) = split_json(args);
-    let follow = rest.iter().any(|a| a == "-f" || a == "--follow");
-    let rest: Vec<String> = rest.into_iter().filter(|a| a != "-f" && a != "--follow").collect();
-    if let Some(a) = rest.iter().find(|a| a.starts_with('-')) {
-        crate::bail!("unknown option {a} (usage: agentcracker log [--json] [-f] [SESSION])");
-    }
-    let s = session::find(rest.first().map(|a| a.as_str()), &cwd()?)?;
+    let a = parse_args("log", args, &["--json", "-f|--follow"], 1)?;
+    let (json, follow) = (a.has("--json"), a.has("--follow"));
+    let s = session::find(a.first(), &cwd()?)?;
     let net = s.path("net.log");
     let (mut events, mut off) = activity::net_events(&net, 0);
     // the agent's tool calls and its test kernel boots, as exported with

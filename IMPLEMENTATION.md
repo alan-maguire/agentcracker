@@ -553,10 +553,13 @@ output capped), and parses that the same way.
 - `cmd_resume` (also `shell`, which runs `vm::exec_running` when the
   session is up), `cmd_ls`, `cmd_show`, `cmd_log`, `cmd_diff`,
   `cmd_apply`, `cmd_branch`, `cmd_wait`, `cmd_stop`, `cmd_rm`,
-  `cmd_refresh`: one per subcommand.
+  `cmd_refresh`, `cmd_cache`: one per subcommand.
 - `run_detached`: `--detach`; `session_brief`/`session_json`: `--json`.
-- Helpers: `parse_opts`, `cwd`, `git_head`, `status_of`, `fmt_time`,
-  `load_cs`.
+- Arguments: `parse_args` (and `Args`) for every subcommand but `run`,
+  `resume` and `shell`, which use `parse_opts` because they stop at the
+  command to run.
+- Helpers: `cwd`, `git_head`, `check_new_branch`, `sessions_from`,
+  `status_of`, `fmt_time`, `load_cs`.
 
 ### `config.rs`
 - `Config::load` / `merge`: defaults plus both files.
