@@ -371,6 +371,91 @@ ext4 and tmpfs, which `acrboot --kconfig` includes.
   that code.  A project's `.agentcracker.toml` cannot turn it on (a
   cloned repository must not grant that to its agents).
 
+### Kernel development in a session
+
+Putting the pieces together for a kernel tree - say, having the agent
+fix a BPF bug and prove the fix with the BPF selftests.  The agent's
+skill covers the build and test steps, so usually you just ask for the
+result; the setup is yours.
+
+**Setup, once.**  `boot = true` in `~/.config/agentcracker/config.toml`,
+and enough memory for a kernel build plus a test VM (`memory = "12G"`;
+the default is at most 8G).  If you install packages on the host for the
+build (`ccache`, `clang`, `pahole`), run `agentcracker refresh` before
+the next session: otherwise that session still boots the previous `/usr`
+snapshot while a new one is built in the background.
+
+**Building.**  A plain in-tree build works: the objects are kept for the
+session, and dropped when it ends, so the next session builds from cold
+again (for scale, bpf-next with the BPF selftests' configuration takes
+about 11 minutes from scratch with 8 vCPUs, and its selftests 3 more).
+Two options make later sessions faster, alone or together, because
+`~/.cache` persists:
+
+- **ccache**, if it is installed: `make CC="ccache gcc" -j$(nproc)`.
+  Recompiling comes from the cache, in-tree or not.  Pass the same `CC`
+  every time (the kernel records it in `.config`), and consider raising
+  ccache's 5G limit (`ccache -M 20G` in a session; the setting is kept in
+  `~/.cache/ccache`).
+- **An out-of-tree build**: `make O=~/.cache/kbuild -j$(nproc)`, so make
+  skips whatever has not changed since the last session.  `make O=`
+  refuses a source tree that has an in-tree build in it ("The source tree
+  is not clean, please run 'make mrproper'"): run `make mrproper` in the
+  tree on the host (in a session it only cleans that session's copy), or
+  give sessions a worktree of their own (`git worktree add ../linux-acr`).
+
+The cache belongs to the directory `agentcracker` was started in, one
+session at a time (a second gets an empty `~/.cache`, and says so); it
+is 64G, sparse, and `agentcracker cache` shows how much is used.
+
+**Configuring for the BPF selftests.**  Their configuration fragments,
+plus what Firecracker needs (shown out of tree; in-tree, drop `O=`,
+`-O $O` and `KBUILD_OUTPUT=`, and use `.config` and `vmlinux` in the
+tree):
+
+```
+O=~/.cache/kbuild B=tools/testing/selftests/bpf
+cat $B/config $B/config.vm $B/config.x86_64 > $O/.config
+acrboot --kconfig > /tmp/acrboot.config
+scripts/kconfig/merge_config.sh -m -O $O $O/.config /tmp/acrboot.config
+make O=$O olddefconfig && make O=$O -j$(nproc)
+make -C $B KBUILD_OUTPUT=$O -j$(nproc)
+```
+
+The selftests build in the source tree, so they are rebuilt each
+session; git ignores their output, so it stays out of the review.
+
+**Running them.**  `--run` boots the new kernel on the session's own
+userspace with a copy of the selftests directory, so `test_progs` runs
+as built:
+
+```
+acrboot --cpus 8 --mem 8G --timeout 3600 --dir $B --run './test_progs -j' $O/vmlinux
+acrboot --cpus 8 --mem 8G --dir $B --run './test_progs -t NAME' $O/vmlinux
+```
+
+`acrboot` exits with `test_progs`' status.  The whole suite takes two
+to three minutes on 8 vCPUs, and copying the 1.5G directory into the
+test VM a few seconds per boot.
+
+**Verifying a fix.**  Reproduce first: run the failing test with `-t`
+on a kernel built without the fix and keep its output, then apply the
+fix, rebuild (incremental), and run it again, then the whole suite for
+regressions.  Each boot is a `boot` line in `agentcracker log`, with its
+console kept in the session, so you can check what the agent ran and
+what it saw before you `apply` its change.
+
+**What differs from `vmtest.sh` and CI.**
+
+- **The userspace is your host's.**  Tests that need a tool your host
+  lacks fail (`xdp_synproxy` wants `iptables-legacy`), and the BPF
+  programs are compiled by your host's clang: a development snapshot can
+  make the verifier reject programs that CI's release clang does not.
+  Compare against a run on an unmodified kernel before blaming the fix.
+- **No PMU.**  Tests that need hardware performance counters fail.
+- **No QEMU.**  `vmtest.sh` cannot run in a session; `acrboot --run`
+  replaces it.
+
 ## Kernel and root filesystem: the host's own userspace
 
 The usual way to give a sandbox tools is an image: a Dockerfile, an
