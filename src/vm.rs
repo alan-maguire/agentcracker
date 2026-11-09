@@ -54,7 +54,9 @@ pub struct Outcome {
 
 /// Paths below `$HOME` copied into the guest on the first boot of a session.
 ///
-/// These are git's user configuration; the agent profile's seed paths
+/// These are git's global ignore file (never its configuration, which can
+/// hold passwords and tokens: the guest gets only the user's identity, see
+/// [`crate::guidance::git_identity`]); the agent profile's seed paths
 /// (its settings, instructions and extensions; see [`crate::agent`]); for
 /// Claude Code, this project's history directory
 /// (`~/.claude/projects/<cwd with every non-alphanumeric character replaced
@@ -67,7 +69,7 @@ pub struct Outcome {
 /// is built.
 fn first_boot_seed(cwd: &Path, cfg: &Config, p: &Profile) -> Vec<String> {
     let h = home();
-    let mut v: Vec<String> = [".gitconfig", ".config/git/config", ".config/git/ignore"].iter().map(|s| s.to_string()).collect();
+    let mut v: Vec<String> = vec![".config/git/ignore".to_string()];
     v.extend(p.seed.iter().map(|s| p.path(&h, s)));
     if p.name == "claude" {
         let mangled: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
@@ -590,7 +592,10 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
                 vcpus: s.meta.vcpus,
                 mem_mib: s.meta.mem_mib,
             },
-        ),
+        )
+        .into_iter()
+        .chain(crate::guidance::git_identity())
+        .collect(),
     };
     let seed = build_seed(&s.meta.cwd, cfg, first_boot, profile)?;
     crate::util::mark("home seed built");

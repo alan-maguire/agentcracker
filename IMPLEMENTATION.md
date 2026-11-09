@@ -143,7 +143,8 @@ If any step fails, the half-made session directory is removed.
 5. builds the `GuestConfig` (identity, cwd, command, environment from
    `guest_env`, tools, ancestor directory owners, device names) and the
    home seed (`build_seed`: Claude Code settings and credentials, a
-   `~/.claude.json` pruned to this project, git config);
+   `~/.claude.json` pruned to this project, git's global ignore file;
+   git's identity goes as an agent file, `guidance::git_identity`);
 6. starts Firecracker, with its output appended to `console.log`, and
    calls `attach`.
 
@@ -426,6 +427,7 @@ reaches the host, and how each one is handled:
 | `state.stream` | Unpacked with `Confined` into the session's `state/`; symlinks and deletions ignored. |
 | Credentials | Never written back to the host or kept in the session; a refresh in the guest is only reported. |
 | Terminal output | Every guest-derived string agentcracker prints (paths, symlink targets, diffs on a terminal, branch names, host names, transcript text, guest errors, console tails) goes through `util::safe_text`, which shows control, C1 and bidi-override characters as escapes; the terminal is soft-reset after an interactive session; the proxy refuses CONNECT targets that are not host names or IP literals. |
+| Secrets in git's configuration | The guest's `~/.gitconfig` is written by agentcracker with `user.name` and `user.email` only (`guidance::git_identity`), on every boot; the user's own (`sendemail.smtpPass`, tokens in URLs or headers, credential helpers) never enters the VM. |
 | Secrets in the snapshots | The project snapshot's `.git/config` has `user:token@` stripped from URLs and `extraheader` lines dropped; the toolchain snapshot excludes cargo, npm, PyPI, netrc and git credential files; new sessions warn about credential-like project files (`images::credential_like`). |
 | Network | No NIC; HTTPS `CONNECT` only, to allowlisted hosts (port 443 unless `host:port` is listed); DNS resolved on the host; decisions logged. |
 | Test kernels (`acrboot`) | Off unless the user's config says `boot = true` (a project's cannot); otherwise the host hides VMX and SVM from the guest (a Firecracker CPU template: its KVM then refuses VMXON and EFER.SVME), so a guest kernel the agent took over cannot reach the host's nested-virtualisation code either, and acinit removes `/dev/kvm`; with it acinit makes `/dev/kvm` the user's.  Nothing runs on the host: the test VM is a Firecracker nested in the session's VM (its CPUs, memory and disk), with no network and no vsock, killed on timeout, a few seconds after a panic, and with the session.  The agent controls that VM's kernel, and the host's KVM handles its exits first, so the boundary there is the host's nested-virtualisation code against ring 0.  Its records reach the host as state (`boot.log` lines parsed strictly and escaped when shown, consoles capped at 4M × 20). |

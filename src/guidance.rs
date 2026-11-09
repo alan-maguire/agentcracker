@@ -61,6 +61,35 @@ pub fn agent_files(p: &Profile, home: &Path, c: &Context) -> Vec<AgentFile> {
     out
 }
 
+/// The guest's git configuration: only the user's identity
+/// (`user.name`, `user.email`, as `git config --global` reports them on the
+/// host), written to `~/.gitconfig` on every boot so the agent's commits
+/// are the user's.  The rest of the user's configuration never enters the
+/// VM - it can hold `sendemail.smtpPass`, tokens in `url.*.insteadOf` or
+/// `http.extraHeader`, credential helpers - and `~/.config/git/config`,
+/// which sessions created before this got a copy of, is removed.
+pub fn git_identity() -> Vec<AgentFile> {
+    let get = |k: &str| {
+        let o = std::process::Command::new("git").args(["config", "--global", "--get", k]).output().ok()?;
+        let v = String::from_utf8(o.stdout).ok()?;
+        let v = v.trim();
+        (o.status.success() && !v.is_empty() && !v.contains(['\n', '\r', '\0'])).then(|| v.to_string())
+    };
+    // quoted, with git's escapes for `"` and `\`
+    let quote = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut user = String::new();
+    for k in ["name", "email"] {
+        if let Some(v) = get(&format!("user.{k}")) {
+            user.push_str(&format!("\t{k} = {}\n", quote(&v)));
+        }
+    }
+    let config = (!user.is_empty()).then(|| format!("# written by agentcracker on every boot: your identity only\n[user]\n{user}"));
+    vec![
+        AgentFile { path: ".gitconfig".into(), content: config, block: false },
+        AgentFile { path: ".config/git/config".into(), content: None, block: false },
+    ]
+}
+
 /// The section for the instructions file.
 fn instructions(c: &Context) -> String {
     let cwd = c.cwd.display();

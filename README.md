@@ -469,8 +469,9 @@ the commits and take them as a branch.
 2. **Ask for the change, the test and the commits.**  For example: "fix
    the verifier bug in ..., reproduce it with `test_progs -t NAME` under
    acrboot before and after, run the whole suite, and commit the fix and
-   the new test separately with a Signed-off-by".  Your `~/.gitconfig` is
-   copied in, so the commits carry your identity.
+   the new test separately with a Signed-off-by".  The session's git
+   has your name and email (and nothing else of your git configuration),
+   so the commits carry your identity.
 3. **Watch, or not.**  `agentcracker log -f` in another terminal shows
    its commands, test boots and network requests as they happen.
 4. **On exit, take the branch.**  The review menu says the agent
@@ -740,8 +741,9 @@ host's credential store should be reachable.
 
 - agentcracker copies a _minimal_ set of agent config into the guest
   `$HOME` at boot: e.g. for Claude Code, the API key or OAuth token and
-  settings - but not `~/.ssh`, `~/.aws`, `~/.gitconfig` credential
-  helpers, browser profiles, etc.
+  settings - but not `~/.ssh`, `~/.aws`, browser profiles, etc.  Of
+  git's configuration only `user.name` and `user.email` go in: the rest
+  can hold `sendemail.smtpPass`, tokens and credential helpers.
 - Optionally, transcripts and agent state written in the guest are
   synced back to the host on exit (`--sync-agent-state`), so session
   history survives.

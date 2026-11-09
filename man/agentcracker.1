@@ -751,7 +751,12 @@ Log in on the host
 .RB ( "codex login" );
 the login is copied in.
 .PP
-For every agent, git's user configuration is copied in too, a login
+For every agent, git gets only your identity
+.RB ( user.name " and " user.email ,
+written to the guest's
+.I ~/.gitconfig
+on every boot) and your global ignore file \(em never the rest of your
+git configuration, which can hold passwords and tokens \(em a login
 refreshed inside the guest is reported but never copied back, and files
 that instruct agents
 .RB ( CLAUDE.md ,

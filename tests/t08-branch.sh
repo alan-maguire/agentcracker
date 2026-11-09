@@ -90,6 +90,24 @@ assert_rc 1 "an invalid name is refused"
 ac resume --branch y "$sid" true
 assert_rc 1 "--branch is for new sessions only"
 
+step "the guest gets the user's git identity, and nothing else of their config"
+cat >"$WORK/gitconfig" <<'CFG'
+[user]
+	name = Test \"Q\" User
+	email = test@example.com
+[sendemail]
+	smtppass = SECRET-smtp
+[url "https://x:SECRET-token@example.com/"]
+	insteadOf = https://example.com/
+CFG
+GIT_CONFIG_GLOBAL=$WORK/gitconfig ac_run sh -c '
+git config --global user.name; git config --global user.email
+cat ~/.gitconfig ~/.config/git/config 2>/dev/null
+git commit -q --allow-empty -m mine && git log -1 --format="%an <%ae>"'
+assert_contains "$AC_OUT" "$(printf 'Test "Q" User\ntest@example.com')" "name and email are there"
+assert_not_contains "$AC_OUT" "SECRET" "no other setting is"
+assert_contains "$AC_OUT" 'Test "Q" User <test@example.com>' "and the agent's commits are the user's"
+
 step "not a git repository"
 new_project plain
 ac_run sh -c 'echo x > y.txt'
