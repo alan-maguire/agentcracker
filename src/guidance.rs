@@ -126,14 +126,23 @@ Use the uncompressed ELF `vmlinux` at the top of the build tree, never
 configuration:
 
 ```
-acrboot --kconfig > acrboot.config
-scripts/kconfig/merge_config.sh -m .config acrboot.config   # with O=, add -O <dir> and use <dir>/.config
+acrboot --kconfig > /tmp/acrboot.config
+scripts/kconfig/merge_config.sh -m .config /tmp/acrboot.config   # with O=, add -O <dir> and use <dir>/.config
 make olddefconfig
 ```
 
-Build out of tree in `~/.cache` when you can (`make O=~/.cache/kbuild`):
-it persists across sessions, so the next build is incremental, and build
-output stays out of the user's review.
+An in-tree build works, but its objects are gone next session.  `~/.cache`
+persists across sessions, so two options make later builds faster, alone
+or together:
+
+- ccache, if installed (`command -v ccache`): `make CC="ccache gcc"`,
+  with the same `CC` on every `make`.  Its default 5G limit is small for
+  a kernel: `ccache -M 20G` once.
+- Out of tree: `make O=~/.cache/kbuild`, so unchanged objects are not
+  rebuilt.  `make O=` refuses a source tree with an in-tree build ("The
+  source tree is not clean"): do not clean or clone it yourself - ask the
+  user to run `make mrproper` in it on the host (a clean here lasts only
+  this session), and use ccache meanwhile.
 
 ## 2. Run built-in tests (KUnit)
 
@@ -160,26 +169,28 @@ kernel resets it.
 ## 4. Run tests on this session's userspace (`--run`)
 
 `--run CMD` boots the kernel on this VM's own root and `/usr`, read-only,
-with a copy of `--dir DIR` (default `.`) at the same path, and runs CMD
-there as root (`sh -c`), with bpffs, debugfs, tracefs and cgroup2
-mounted.  `acrboot` exits with CMD's status.  No root disk to build: the
-binaries run against the libraries they were built with.  Keep DIR small
-(it is copied); writes in it are discarded.  For the BPF selftests
-(`tools/testing/selftests/bpf/vmtest.sh` cannot run here - it needs QEMU
-and sudo):
+with a copy of `--dir DIR` (default: the current directory) at the same
+path, and runs CMD in it as root (`sh -c`), with bpffs, debugfs, tracefs
+and cgroup2 mounted.  `acrboot` exits with CMD's status.  No root disk to
+build: the binaries run against the libraries they were built with.
+Only DIR is copied - the rest of the kernel tree is not there - and
+writes in it are discarded; keep it small (not the whole tree).  For the
+BPF selftests (`tools/testing/selftests/bpf/vmtest.sh` cannot run here -
+it needs QEMU and sudo):
 
 ```
 B=tools/testing/selftests/bpf; cat $B/config $B/config.vm $B/config.x86_64 > $O/.config
-acrboot --kconfig > acrboot.config
-scripts/kconfig/merge_config.sh -m -O $O $O/.config acrboot.config
+acrboot --kconfig > /tmp/acrboot.config
+scripts/kconfig/merge_config.sh -m -O $O $O/.config /tmp/acrboot.config
 make O=$O olddefconfig && make O=$O -j$(nproc)
 make -C tools/testing/selftests/bpf KBUILD_OUTPUT=$O -j$(nproc)
 acrboot --cpus {vcpus} --timeout 3600 --dir tools/testing/selftests/bpf \
   --run './test_progs -j > /tmp/out 2>&1; rc=$?; grep -E "^(Summary|#.*FAIL)" /tmp/out; exit $rc' $O/vmlinux
 ```
 
-(`O` out of tree in `~/.cache`; `make O=` refuses a source tree that has
-an in-tree build, so build from a clean checkout or `git clone --shared`.)
+(Shown out of tree, `O=~/.cache/kbuild`; add `CC="ccache gcc"` to the
+kernel `make`s if ccache is installed.  In-tree, drop `O=`, `-O $O` and
+`KBUILD_OUTPUT=`, and use `.config` and `vmlinux` in the tree.)
 Run a subset with `./test_progs -t NAME`.  Tests that need hardware
 performance counters fail here: the test VM has no PMU.
 
