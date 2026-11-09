@@ -109,6 +109,11 @@ pub struct Meta {
     /// The host branch created by `agentcracker branch`, if any.
     #[serde(default)]
     pub branch: Option<String>,
+    /// The branch given with `--branch`: the agent works on it in the
+    /// guest, and `agentcracker branch` imports into it (fast-forward only)
+    /// instead of `agentcracker/<id>`.
+    #[serde(default)]
+    pub work_branch: Option<String>,
     /// Hash of `~/.claude/.credentials.json` as last sent to the guest, used to
     /// decide whether a token the guest refreshed can safely be written back.
     #[serde(default)]

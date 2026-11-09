@@ -293,7 +293,18 @@ overwrite them.
 files (loose objects and packs, names validated) out of the stream into
 a bare scratch repository, which borrows the host's objects via
 `alternates`.  The host repository then fetches the agent's HEAD from it
-with `fetch.fsckObjects` into `agentcracker/<id>`.
+with `fetch.fsckObjects` into `agentcracker/<id>` (forced), or into the
+session's `--branch` name (`SessionMeta::work_branch`) without forcing:
+that branch is checked first, so a branch checked out on the host, or
+one the agent's HEAD does not descend from, is refused with a reason.
+
+`--branch NAME` (`cli::check_new_branch`) needs a git repository with
+commits and a valid name not yet used there.  On the session's first
+boot it goes to the guest as `GuestConfig::git_branch` (name and the
+base commit), and acinit's `start_branch` writes
+`.git/refs/heads/<name>` and `.git/HEAD`, as the user, before the
+command starts; the index and work tree already match the base.  The
+agent's instructions name the branch.
 
 ### 3.9 Later: resume, shell, show, rm
 

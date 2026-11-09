@@ -1,6 +1,7 @@
 #!/bin/bash
-# Git: the agent's commits become a host branch (objects verified on import);
-# the host repository is otherwise untouched.
+# Git: the agent's commits become a host branch (objects verified on import),
+# named after the session or by --branch; the host repository is otherwise
+# untouched.
 . "$(dirname "$0")/lib.sh"
 require_vm
 require_cmd git
@@ -55,6 +56,39 @@ step "branch without commits"
 ac_run sh -c 'echo x > y.txt'
 ac branch "$SID"
 assert_rc 1 "branch fails when the agent made no commits"
+
+step "--branch: the agent works on a branch of that name"
+ac_run --branch feature/x sh -c '
+G="git -c user.name=agent -c user.email=agent@example.com"
+git symbolic-ref --short HEAD; grep -c "branch .feature/x." ~/.claude/CLAUDE.md
+echo one > x.txt && git add x.txt && $G commit -qm "x one"
+'
+assert_rc 0 "the session runs"
+assert_eq "$AC_OUT" "$(printf 'feature/x\n1')" "it starts on the branch, and is told"
+sid=$SID
+ac show "$sid"
+assert_contains "$AC_OUT" "feature/x (the agent's; not imported yet)" "show names it before the import"
+ac branch "$sid"
+assert_contains "$AC_ERR" "created branch feature/x" "branch imports into it"
+assert_eq "$(git log -1 --format=%s feature/x)" "x one" "with the agent's commit"
+assert_eq "$(git rev-parse feature/x~1)" "$base" "on top of the session's base"
+assert_eq "$(git symbolic-ref --short HEAD)" "main" "the host stays on its branch"
+ac resume "$sid" sh -c 'git -c user.name=agent -c user.email=agent@example.com commit -q --allow-empty -m "x two"; git symbolic-ref --short HEAD'
+assert_eq "$AC_OUT" "feature/x" "a resumed session is still on it"
+ac branch "$sid"
+assert_eq "$(git log -1 --format=%s feature/x)" "x two" "a later import fast-forwards it"
+ac resume "$sid" sh -c 'git -c user.name=agent -c user.email=agent@example.com commit -q --amend --allow-empty -m "x rewritten"'
+ac branch "$sid"
+assert_rc 1 "an import that is not a fast-forward is refused"
+assert_contains "$AC_ERR" "does not build on" "saying why"
+assert_eq "$(git log -1 --format=%s feature/x)" "x two" "and the branch is left as it was"
+ac --branch feature/x true
+assert_rc 1 "a branch that exists already is refused"
+assert_contains "$AC_ERR" "already exists" "naming the problem"
+ac --branch 'bad..name' true
+assert_rc 1 "an invalid name is refused"
+ac resume --branch y "$sid" true
+assert_rc 1 "--branch is for new sessions only"
 
 step "not a git repository"
 new_project plain

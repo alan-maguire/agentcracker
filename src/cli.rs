@@ -44,7 +44,7 @@ const USAGE: &str = "\
 agentcracker - run a coding agent in a disposable Firecracker microVM
 
 usage:
-  agentcracker [--allow HOST]... [--no-net] [--console] [--detach] <command> [args...]
+  agentcracker [--allow HOST]... [--no-net] [--console] [--detach] [--branch NAME] <command> [args...]
         run <command> in a new session for the current directory
   agentcracker ls     [--json]          list sessions
   agentcracker show   [--json] [SESSION]   details: changes, network, agent transcripts
@@ -69,6 +69,8 @@ options:
   --allow HOST   also allow HTTPS to HOST (*.example.com for subdomains)
   --no-net       no network at all
   --console      show the guest kernel console (debugging)
+  --branch NAME  the agent works on a new git branch NAME (from HEAD), which
+                 `branch` imports into the repository as NAME
   --detach       run in the background: print the session id and return;
                  output goes to the session's stdout/stderr files
 
@@ -88,6 +90,8 @@ struct Opts {
     detach: bool,
     /// `--json`: machine-readable output.
     json: bool,
+    /// `--branch NAME`: the git branch the agent works on (new sessions).
+    branch: Option<String>,
     /// The command and its arguments: everything from the first non-option, or
     /// after `--`.
     rest: Vec<String>,
@@ -101,7 +105,7 @@ struct Opts {
 /// command's own options are left alone.  Returns the options; errors for an
 /// unknown option or an `--allow` without a value.
 fn parse_opts(args: &[String]) -> Result<Opts> {
-    let mut o = Opts { allow: vec![], no_net: false, console: false, detach: false, json: false, rest: vec![] };
+    let mut o = Opts { allow: vec![], no_net: false, console: false, detach: false, json: false, branch: None, rest: vec![] };
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -121,6 +125,11 @@ fn parse_opts(args: &[String]) -> Result<Opts> {
             o.detach = true;
         } else if a == "--json" {
             o.json = true;
+        } else if a == "--branch" {
+            i += 1;
+            o.branch = Some(args.get(i).ctx("--branch needs a name")?.clone());
+        } else if let Some(b) = a.strip_prefix("--branch=") {
+            o.branch = Some(b.to_string());
         } else if a.starts_with('-') && o.rest.is_empty() {
             crate::bail!("unknown option {a}\n\n{USAGE}");
         } else {
@@ -252,6 +261,25 @@ fn git_head(cwd: &Path) -> Option<String> {
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
+/// Check `name` for `--branch`: `cwd` must be a git repository (not a
+/// worktree) with commits (`has_head`), `name` a valid branch name, and no
+/// such branch may exist there yet - it is created by importing the
+/// agent's commits, never overwritten.  Returns the name.
+fn check_new_branch(cwd: &Path, has_head: bool, name: &str) -> Result<String> {
+    if !cwd.join(".git").is_dir() || !has_head {
+        crate::bail!("--branch needs a git repository with commits (and not a worktree)");
+    }
+    let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(cwd).args(args).output();
+    let ok = !name.starts_with('-') && git(&["check-ref-format", &format!("refs/heads/{name}")]).is_ok_and(|o| o.status.success());
+    if !ok {
+        crate::bail!("--branch {name}: not a valid branch name");
+    }
+    if git(&["rev-parse", "--verify", "-q", &format!("refs/heads/{name}")]).is_ok_and(|o| o.status.success()) {
+        crate::bail!("--branch {name}: the branch already exists (the agent's commits go on a new branch)");
+    }
+    Ok(name.to_string())
+}
+
 /// `agentcracker [run] [options] <command> [args...]`: run a command in a
 /// new session for the current directory.
 ///
@@ -288,6 +316,9 @@ fn cmd_run(args: &[String]) -> Result<i32> {
         s.meta.agent = Some(profile.name.to_string());
         s.meta.allow = profile.allow.iter().map(|a| a.to_string()).chain(cfg.allow.iter().cloned()).chain(o.allow.iter().cloned()).collect();
         s.meta.git_head = git_head(&cwd);
+        if let Some(b) = &o.branch {
+            s.meta.work_branch = Some(check_new_branch(&cwd, s.meta.git_head.is_some(), b)?);
+        }
         let lower = images::lower_image(&cfg, &cwd)?;
         crate::util::mark("project snapshot");
         let link = |src: &Path, name: &str| -> Result<()> {
@@ -613,6 +644,9 @@ fn apply_interactive(s: &mut Session, cs: &ChangeSet) -> Result<bool> {
 /// or its project directory no longer exists.
 fn cmd_resume(args: &[String], shell: bool) -> Result<i32> {
     let o = parse_opts(args)?;
+    if o.branch.is_some() {
+        crate::bail!("--branch is for new sessions (a session keeps the branch it started with)");
+    }
     let mut rest = o.rest.clone();
     let id = match rest.first() {
         Some(a) if session::looks_like_id(a) => Some(rest.remove(0)),
@@ -808,6 +842,8 @@ fn cmd_show(args: &[String]) -> Result<i32> {
     }
     if let Some(b) = &m.branch {
         row("branch", b.clone());
+    } else if let Some(b) = &m.work_branch {
+        row("branch", format!("{b} (the agent's; not imported yet)"));
     }
     match ChangeSet::load(&s) {
         Ok(Some(cs)) => {

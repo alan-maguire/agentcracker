@@ -576,6 +576,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         dev_lower_delta: lower_delta.as_ref().map(|_| "/dev/vdf".into()),
         dev_cache: dev_cache.clone(),
         boot: cfg.boot,
+        git_branch: s.meta.work_branch.clone().zip(s.meta.git_head.clone()).filter(|_| first_boot),
         agent_files: crate::guidance::agent_files(
             profile,
             &home(),
@@ -585,6 +586,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
                 allow: &s.meta.allow,
                 cache: dev_cache.is_some(),
                 boot: cfg.boot,
+                branch: s.meta.work_branch.as_deref(),
                 vcpus: s.meta.vcpus,
                 mem_mib: s.meta.mem_mib,
             },

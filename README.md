@@ -52,13 +52,13 @@ without burying its edits under thousands of object files.
 Everything else is a subcommand:
 
 ```
-agentcracker [--allow HOST]... [--no-net] [--console] [--detach] <command> [args...]
+agentcracker [--allow HOST]... [--no-net] [--console] [--detach] [--branch NAME] <command> [args...]
 agentcracker ls     [--json]         # sessions: age, status, changes, directory
 agentcracker show   [--json] [SESSION]   # changes, network log, Claude transcripts, disk use
 agentcracker log    [--json] [-f] [SESSION]   # network requests + the agent's tool calls
 agentcracker diff   [--ignored] [SESSION]   # --ignored: include what git ignores
 agentcracker apply  [--ignored] [SESSION]
-agentcracker branch [SESSION]        # agent's commits -> branch agentcracker/<id>
+agentcracker branch [SESSION]        # agent's commits -> branch agentcracker/<id>, or --branch's NAME
 agentcracker resume [SESSION] [command...]
 agentcracker shell  [SESSION]        # also opens a shell inside a *running* session
 agentcracker wait   [--json] [SESSION...]   # for --detach'ed sessions
@@ -456,6 +456,39 @@ what it saw before you `apply` its change.
 - **No QEMU.**  `vmtest.sh` cannot run in a session; `acrboot --run`
   replaces it.
 
+### A working cycle: write, test, commit
+
+The pieces above make one loop: the agent writes the code, tests it in
+its own VM (for a kernel, with `acrboot`), and commits it; you review
+the commits and take them as a branch.
+
+1. **Start the session on a branch.**  `agentcracker --branch fix/foo
+   claude` in your repository (with `boot = true` for a kernel).  The
+   agent starts on a new branch `fix/foo` at your `HEAD`, and is told to
+   commit its work there.  Your own checkout stays where it is.
+2. **Ask for the change, the test and the commits.**  For example: "fix
+   the verifier bug in ..., reproduce it with `test_progs -t NAME` under
+   acrboot before and after, run the whole suite, and commit the fix and
+   the new test separately with a Signed-off-by".  Your `~/.gitconfig` is
+   copied in, so the commits carry your identity.
+3. **Watch, or not.**  `agentcracker log -f` in another terminal shows
+   its commands, test boots and network requests as they happen.
+4. **On exit, take the branch.**  The review menu says the agent
+   committed and offers **`[b]ranch`**: it imports the commits into your
+   repository as `fix/foo`, without touching your current branch, index
+   or work tree.  Review them like anyone's (`git log -p main..fix/foo`),
+   and use **`[d]iff`** for anything it changed but did not commit.  Then
+   merge, rebase or send them as you would any branch.
+5. **Iterate.**  `agentcracker resume SESSION` boots the same session
+   again, still on `fix/foo`; ask for changes, then `agentcracker branch`
+   (or `[b]` on exit) again.  A named branch is only ever fast-forwarded:
+   if the agent rewrote commits you already imported, or you moved
+   `fix/foo` yourself, the import is refused and says so (nor does it
+   import into a branch you have checked out).
+
+Without `--branch`, the commits are imported as `agentcracker/<id>`
+(overwritten by a later import), wherever the agent made them.
+
 ## Kernel and root filesystem: the host's own userspace
 
 The usual way to give a sandbox tools is an image: a Dockerfile, an
@@ -775,9 +808,10 @@ directory and diffs it against the base manifest.
 
 If `$PWD` is a git repo, a second presentation is available: apply the
 change set to a temporary worktree based on `HEAD` and show it as a
-normal `git diff`, or commit it to a branch
-(`agentcracker apply --branch agent/fix-foo`) so it can be reviewed
-and merged like any other contribution.
+normal `git diff`; and the agent's own commits are imported as a branch
+(`agentcracker branch`, into `agentcracker/<id>` or the session's
+`--branch NAME`) so they can be reviewed and merged like any other
+contribution.
 
 ## Applying changes safely
 
@@ -803,7 +837,7 @@ the paranoia goes:
   `.git/config`, `.envrc`, `.vscode/`, `Makefile`, CI config, shell rc
   files.  An agent quietly adding a git hook is a sandbox escape by
   another name.  By default `.git/` internals are excluded from apply
-  entirely; only working-tree changes (and, with `--branch`, the
+  entirely; only working-tree changes (and, through `branch`, the
   agent's commits) come across.
 - **Leave build output out.**  Changes git ignores are counted but not
   listed or applied unless asked for (`--ignored`).  The rules are the
@@ -995,7 +1029,7 @@ cloud coding agents such as Claude Code on the web or Codex cloud._
   at all.
 - **Writes:** into a remote clone of the repo; work comes back as a
   branch or pull request.  This is the cleanest review boundary of
-  all, and the one agentcracker's `apply --branch` mode imitates.
+  all, and the one agentcracker's `branch` imitates.
 - **Network:** controlled by the provider, often configurable.
 - **Toolchain:** a provider image, customisable to varying degrees.
 - **Cost:** money, latency, a git remote (uncommitted local state is

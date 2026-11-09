@@ -176,6 +176,12 @@ pub struct GuestConfig {
     /// `$HOME/.cache`, if the session has it (see [`crate::buildcache`]).
     #[serde(default)]
     pub dev_cache: Option<String>,
+    /// `--branch`, on the session's first boot: `(name, commit)`.  acinit
+    /// creates branch `name` at `commit` in the project's repository and
+    /// checks it out (by writing `.git/refs/heads/<name>` and `.git/HEAD`),
+    /// so the agent's commits go on it.
+    #[serde(default)]
+    pub git_branch: Option<(String, String)>,
     /// Booting test kernels is on (`boot = true`): `/dev/kvm` is made
     /// usable by the user, and removed otherwise.
     #[serde(default)]

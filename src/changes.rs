@@ -1284,8 +1284,8 @@ fn git(args: &[&str], dir: &Path) -> Result<String> {
 }
 
 /// Import the agent's new git objects into the host repository via a
-/// scratch repository and `git fetch` (with fsck), creating the branch
-/// `agentcracker/<id>`.
+/// scratch repository and `git fetch` (with fsck), creating or updating a
+/// branch.
 ///
 /// Only object files are taken from the change stream - loose objects
 /// (`objects/xx/<hex>`) and packs (`objects/pack/pack-<hex>.{pack,idx,rev}`),
@@ -1294,8 +1294,10 @@ fn git(args: &[&str], dir: &Path) -> Result<String> {
 /// borrows the host repository's objects through `alternates` and gets a
 /// ref for the agent's HEAD; the host repository then fetches from it with
 /// `fetch.fsckObjects`, so malformed objects are rejected, and no hooks,
-/// config or refs from the guest are ever used.  An existing branch with
-/// the same name is overwritten.
+/// config or refs from the guest are ever used.  The branch is the
+/// session's `--branch` if it has one, updated only by a fast-forward
+/// (git refuses anything else, and a branch checked out on the host);
+/// otherwise `agentcracker/<id>`, overwritten if it exists.
 ///
 /// `cs`: the change set; `s`: the session (id and base commit).  Returns
 /// the branch name and a description such as `3 commit(s) on main`.  Errors
@@ -1329,10 +1331,29 @@ pub fn import_branch(cs: &ChangeSet, s: &Session) -> Result<(String, String)> {
     let objects = cs.cwd.join(".git/objects");
     std::fs::write(tmp.join("objects/info/alternates"), format!("{}\n", objects.display()))?;
     git(&["update-ref", "refs/heads/agent", &sha], &tmp)?;
-    let branch = format!("agentcracker/{}", s.meta.id);
+    // a --branch name only moves forward; agentcracker/<id> is ours to reset
+    let (branch, force) = match &s.meta.work_branch {
+        Some(b) => (b.clone(), ""),
+        None => (format!("agentcracker/{}", s.meta.id), "+"),
+    };
+    if force.is_empty() {
+        // say why git would refuse (it says nothing with -q)
+        let r = format!("refs/heads/{branch}");
+        if git(&["symbolic-ref", "-q", "HEAD"], &cs.cwd).is_ok_and(|h| h == r) {
+            crate::bail!("{branch} is checked out here: switch to another branch to import into it");
+        }
+        if let Ok(tip) = git(&["rev-parse", "--verify", "-q", &r], &cs.cwd) {
+            if git(&["merge-base", "--is-ancestor", &tip, &sha], &tmp).is_err() {
+                crate::bail!(
+                    "{branch} has commits the agent's does not build on (it rewrote history, or {branch} moved here): \
+                     not imported; rename or delete {branch} here and import again"
+                );
+            }
+        }
+    }
     let tmp_s = tmp.display().to_string();
     git(
-        &["-c", "fetch.fsckObjects=true", "fetch", "-q", "--no-tags", "--no-write-fetch-head", &tmp_s, &format!("+refs/heads/agent:refs/heads/{branch}")],
+        &["-c", "fetch.fsckObjects=true", "fetch", "-q", "--no-tags", "--no-write-fetch-head", &tmp_s, &format!("{force}refs/heads/agent:refs/heads/{branch}")],
         &cs.cwd,
     )?;
     let _ = std::fs::remove_dir_all(&tmp);

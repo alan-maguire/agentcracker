@@ -40,6 +40,8 @@ pub struct Context<'a> {
     /// Whether `acrboot` is enabled, and the session's CPUs and memory
     /// (the test VMs' limits).
     pub boot: bool,
+    /// The session's `--branch`, if any.
+    pub branch: Option<&'a str>,
     pub vcpus: u32,
     pub mem_mib: u64,
 }
@@ -68,6 +70,13 @@ fn instructions(c: &Context) -> String {
          - Your changes to `{cwd}` stay in this VM until the user reviews them and chooses to apply them. \
          Work normally - edit, build, test, commit.  Changes outside `{cwd}` never leave this VM.\n"
     );
+    if let Some(b) = c.branch {
+        s.push_str(&format!(
+            "- The user started this session on git branch `{b}`: commit your work on it, in logical commits.  \
+             They import it into their repository as `{b}`, by fast-forward only, so don't rewrite commits \
+             that were there when the session started.\n"
+        ));
+    }
     if c.cache {
         s.push_str(
             "- `~/.cache` persists across this project's sessions: keep build caches there (ccache, Go and pip \

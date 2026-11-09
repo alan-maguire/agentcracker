@@ -10,6 +10,8 @@ agentcracker, acr \- run coding agents in disposable Firecracker microVMs
 .RB [ \-\-no\-net ]
 .RB [ \-\-console ]
 .RB [ \-\-detach ]
+.RB [ \-\-branch
+.IR NAME ]
 .I command
 .RI [ args ...]
 .br
@@ -217,7 +219,10 @@ so applying twice is harmless.  See
 .BR branch " [\fIsession\fR]"
 If the agent made git commits, import them into the host repository as
 branch
-.BI agentcracker/ session\fR.
+.BI agentcracker/ session
+(replaced by a later import), or as the session's
+.B \-\-branch
+name (fast-forward only).
 The current branch, index and work tree are not touched.
 .TP
 .BR resume " [\fIoptions\fR] [\fIsession\fR] [\fIcommand\fR [\fIargs\fR...]]"
@@ -327,6 +332,22 @@ session.  With
 print
 .B {\(dqid\(dq: ..., \(dqdir\(dq: ...}
 instead of the bare id.
+.TP
+.BI \-\-branch " NAME"
+In a git repository, start the agent on a new branch
+.I NAME
+at the current
+.B HEAD
+(the branch must not exist yet; your own checkout is not changed), and
+tell it to commit there.
+.B branch
+then imports the agent's commits as
+.I NAME
+instead of
+.BI agentcracker/ session\fR,
+and only ever fast-forwards it: an import of rewritten commits, or into a
+.I NAME
+that moved or is checked out, is refused.  New sessions only.
 .TP
 .BR \-h ", " \-\-help
 Print a usage summary.

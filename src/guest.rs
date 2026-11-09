@@ -930,6 +930,11 @@ fn run() -> Result<()> {
     if let Err(e) = write_agent_files(&home, &cfg.agent_files, cfg.uid, cfg.gid) {
         eprintln!("acinit: agent guidance not written: {e}");
     }
+    if let Some((name, commit)) = &cfg.git_branch {
+        if let Err(e) = start_branch(&nr.join(cwd_rel), name, commit, cfg.uid, cfg.gid) {
+            eprintln!("acinit: branch {name} not created: {e}");
+        }
+    }
     let _ = std::fs::remove_file(seed);
 
     if cfg.net {
@@ -1036,6 +1041,37 @@ fn run() -> Result<()> {
     // not).  The timeout covers a host that has gone away.
     let _ = gone_rx.recv_timeout(Duration::from_secs(10));
     Ok(())
+}
+
+/// Create git branch `name` at `commit` in the repository at `project` and
+/// check it out (`--branch`, see [`crate::proto::GuestConfig::git_branch`]),
+/// by writing the ref and `HEAD` directly: the index and work tree already
+/// match `commit`, which is HEAD on the host.  As the user, like
+/// [`write_agent_files`].
+fn start_branch(project: &Path, name: &str, commit: &str, uid: u32, gid: u32) -> Result<()> {
+    let Some(rel) = crate::util::safe_rel_path(name.as_bytes()) else { crate::bail!("invalid branch name") };
+    if !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        crate::bail!("invalid commit");
+    }
+    let git = project.join(".git");
+    unsafe {
+        libc::setfsgid(gid);
+        libc::setfsuid(uid);
+    }
+    let r = (|| -> Result<()> {
+        let r = git.join("refs/heads").join(rel);
+        if let Some(d) = r.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        std::fs::write(&r, format!("{commit}\n"))?;
+        std::fs::write(git.join("HEAD"), format!("ref: refs/heads/{name}\n"))?;
+        Ok(())
+    })();
+    unsafe {
+        libc::setfsuid(0);
+        libc::setfsgid(0);
+    }
+    r
 }
 
 /// Write the agent guidance files (see [`crate::guidance`]) into `home`,
