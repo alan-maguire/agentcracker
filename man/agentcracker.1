@@ -1095,8 +1095,14 @@ prepares and compares, and applying stays a deliberate step.
 The agent cannot see the host's files outside the project, the user's
 credentials (other than the agent's own), other repositories, or the
 network beyond the allowlist, and a compromise of the guest kernel
-stays inside the VM.  Firecracker itself runs as the invoking user under
-a seccomp filter, without its jailer (which needs root).
+stays inside the VM.  Firecracker itself runs under a seccomp filter
+and, instead of its jailer (which needs root), in a sandbox built
+without privileges: user, mount and network namespaces of its own, on a
+root holding only its binary and libraries, the kernel, the session's
+disks, its runtime directory and
+.IR /dev/kvm .
+Where unprivileged user namespaces are not allowed, it runs without
+that sandbox, and agentcracker says so.
 .PP
 The network allowlist limits where the VM connects, not what leaves it:
 the Anthropic API accepts any API key, and server-side tools such as web

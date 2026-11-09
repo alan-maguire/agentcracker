@@ -481,7 +481,8 @@ What it protects against, and what it doesn't: the agent can't change
 anything outside the VM until you apply, can't read your other files
 (`~/.ssh`, cloud credentials, browser data) and can only connect to
 allowed hosts; a guest kernel exploit has KVM and Firecracker to get
-through.  It can read the whole project and send it to an allowed
+through, and a Firecracker it took over is sandboxed from your files and
+the network.  It can read the whole project and send it to an allowed
 host, it can misuse the API login it was given, and it can't stop you
 applying a bad change without reading it.  [DESIGN.md](DESIGN.md) has
 the full threat model.
@@ -504,16 +505,17 @@ $PREFIX/lib/agentcracker/{acinit,firecracker,vmlinux,seccomp.bpf}
 ~/.local/state/agentcracker/caches/             per-project build caches
 ```
 
-**Firecracker** runs as you, without the jailer (which needs root),
-under a seccomp filter `make` compiles from Firecracker's own policy
-with the glibc spellings of its syscalls added.  It runs in a sandbox
-built without privileges: new user, mount and network namespaces, on a
-root holding only its binary and libraries, the kernel, the session's
-disk images, its runtime directory and `/dev/kvm` - no home directory,
-no project, no network - with no core dumps and no privilege gain on
-exec.  Where unprivileged user namespaces are not allowed (Ubuntu 24.04
-and later restrict them through AppArmor, for example), agentcracker
-says `running Firecracker without its sandbox` and runs it as before.
+**Firecracker** runs sandboxed, and without root: rather than its jailer
+(which needs root), agentcracker starts it in new user, mount and
+network namespaces, on a root holding only its binary and libraries, the
+kernel, the session's disk images, its runtime directory and `/dev/kvm`
+(no home directory, no project, no network), with no core dumps and no
+privilege gain on exec.  It also runs under a seccomp filter `make`
+compiles from Firecracker's own policy with the glibc spellings of its
+syscalls added.  Where unprivileged user namespaces are not allowed
+(Ubuntu 24.04 and later restrict them through AppArmor, for example),
+agentcracker says `running Firecracker without its sandbox` and runs it
+as before.
 
 ### The guest kernel
 

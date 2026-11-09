@@ -4,7 +4,7 @@
 //! toolchains, plus the session's project snapshot and scratch disk),
 //! writes a Firecracker config file, listens on the vsock unix sockets,
 //! starts Firecracker (`--no-api`, with the compiled seccomp filter when it
-//! is installed) and hands over to [`attach`], which drives the control
+//! is installed, in the sandbox `crate::jail` builds) and hands over to [`attach`], which drives the control
 //! protocol (see `crate::proto`):
 //!
 //! 1. accept the guest's control connection (waiting up to 30 s);

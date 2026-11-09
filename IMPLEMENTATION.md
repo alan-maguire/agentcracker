@@ -52,9 +52,9 @@ cargo doc --document-private-items --open
   (the session's init); run as `acrboot`, `acrboot::main`; otherwise the
   host CLI, `cli::run`.  So host and guest always agree on the protocol
   and stream formats, which live in shared code (`src/proto.rs`).
-- **Firecracker** runs as the invoking user, without the jailer, with a
-  seccomp filter compiled at build time, in namespaces and on a root of
-  its own (`src/jail.rs`).  It is started with `--no-api`
+- **Firecracker** runs sandboxed without root: instead of its jailer,
+  `src/jail.rs` gives it namespaces and a root of its own, and it has a
+  seccomp filter compiled at build time.  It is started with `--no-api`
   and a JSON config file.  agentcracker never talks to its API socket.
 - **The guest kernel** is built from source by the Makefile (see "The guest
   kernel" in `README.md`).  It has no modules and no initramfs.
