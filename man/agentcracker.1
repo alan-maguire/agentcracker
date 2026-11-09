@@ -184,9 +184,11 @@ never seen by the proxy.  The proxy sees only
 .IR host : port
 \(em URLs and contents are inside TLS.  With
 .BR \-f ,
-a running session's network requests are printed as they happen; the
-tool calls follow when the session ends, which is when its transcripts
-are copied out.  With
+a running session's events are printed as they happen: network requests
+at once, tool calls and boots within a couple of seconds (they are read
+out of its VM, through the same connection as
+.BR shell ).
+With
 .BR \-\-json ,
 one object per event.  All text is the agent's and is shown escaped.
 .TP

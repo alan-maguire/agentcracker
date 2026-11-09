@@ -517,9 +517,14 @@ as the last drive and passes its device as `GuestConfig::dev_cache`.
 
 The timeline behind `agentcracker log`: `net_events` parses `net.log`
 from a byte offset (so `-f` can follow it), `tool_events` collects tool
-calls from every transcript under `state/.claude/projects` (subagents'
-included), `parse_iso8601` reads their timestamps, and `render`/`json`
-format events, escaping the agent's text.
+calls from every transcript in the exported state (Claude Code's and
+Codex's, subagents' included) and `boot_events` the test boots,
+`parse_iso8601` reads their timestamps, and `render`/`json` format
+events, escaping the agent's text.  While the session runs, the
+transcripts and `boot.log` are still in the guest: `Live::poll` lists
+them with their sizes and reads what each gained since its last call,
+with `vm::exec_capture` (a command over the exec port, as the user, its
+output capped), and parses that the same way.
 
 ### `cli.rs`
 - `run`: dispatch, including the hidden `__seccomp-json` and `__mkimage`.
@@ -579,6 +584,9 @@ format events, escaping the agent's text.
   `hash_file`: what crosses into and out of `$HOME`.
 - `guest_env`, `ancestor_dirs`: parts of the `GuestConfig`.
 - `console_tail`: console context for error messages.
+- `exec_running`, `exec_capture`, `exec_connect`: commands in a running
+  session's VM over the exec port (§3.5), attached or with the output
+  collected.
 
 ### `proxy.rs`
 - `serve` and `handle`: accept vsock-forwarded connections, apply
@@ -646,7 +654,7 @@ format events, escaping the agent's text.
   | `t09-sessions.sh` | listing, lookup, show, removal |
   | `t10-hostile-guest.sh` | credentials, terminal escapes, secrets in snapshots |
   | `t11-orchestration.sh` | `--detach`, `wait`, `stop`, `--json`, shells in a running session |
-  | `t12-log.sh` | `log`: network and tool-call timeline, `-f`, `--json`, escaping |
+  | `t12-log.sh` | `log`: network and tool-call timeline, read live from a running VM, `-f`, `--json`, escaping |
   | `t13-profiles.sh` | agent profiles: Codex seeding, login, environment, transcripts, selection |
 
   `AGENTCRACKER=/path/to/agentcracker make test` tests an installed copy.

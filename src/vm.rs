@@ -878,6 +878,32 @@ pub fn exec_running(s: &Session, cmd: &[String]) -> Result<i32> {
 
 /// Open a connection to the guest's [`PORT_EXEC`] listener through
 /// Firecracker's vsock socket: send `CONNECT <port>` and expect `OK`.
+/// Run `cmd` inside the session's running VM without a terminal and
+/// return its stdout, at most `limit` bytes (the rest is dropped), or
+/// `None` if it exits non-zero.  For reading the guest's files while it
+/// runs (`agentcracker log`); the output is the guest's, so untrusted.
+/// Errors if the VM cannot be reached or the command cannot be started.
+pub fn exec_capture(s: &Session, cmd: &[&str], limit: usize) -> Result<Option<Vec<u8>>> {
+    let mut conn = exec_connect(s)?;
+    conn.set_read_timeout(Some(Duration::from_secs(30)))?;
+    let req = ExecRequest { cmd: cmd.iter().map(|c| c.to_string()).collect(), tty: false, rows: 0, cols: 0, term: None };
+    write_frame(&mut conn, M_EXEC, &serde_json::to_vec(&req)?)?;
+    write_frame(&mut conn, M_STDIN_EOF, &[])?;
+    let mut out = Vec::new();
+    loop {
+        let (t, d) = read_frame(&mut conn).ctx("reading from the session's VM")?;
+        match t {
+            M_STDOUT => out.extend_from_slice(&d[..d.len().min(limit.saturating_sub(out.len()))]),
+            M_ERROR => crate::bail!("{}", crate::util::safe_text(&d, true)),
+            M_EXIT => {
+                let code = d.get(..4).map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(-1);
+                return Ok((code == 0).then_some(out));
+            }
+            _ => {}
+        }
+    }
+}
+
 fn exec_connect(s: &Session) -> Result<UnixStream> {
     use std::io::Read;
     let uds = crate::util::runtime_dir().join(&s.meta.id).join("v.sock");

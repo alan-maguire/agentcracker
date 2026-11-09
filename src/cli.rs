@@ -1281,11 +1281,13 @@ fn cmd_stop(args: &[String]) -> Result<i32> {
 /// call in the agent's transcripts and every test kernel boot (see
 /// [`crate::activity`]).
 ///
-/// With `-f` on a running session, new network events are printed as they
-/// happen; the agent's tool calls and boots follow when the session ends
-/// (that is when its state is copied out).  Returns 0.
+/// On a running session the agent's tool calls and boots are read out of
+/// the VM ([`activity::Live`]); they reach the session's state only when
+/// it ends.  With `-f`, new events are printed as they happen: network
+/// events at once, the agent's within a couple of seconds.  Returns 0.
 fn cmd_log(args: &[String]) -> Result<i32> {
     use crate::activity::{self, Event};
+    use std::time::{Duration, Instant};
     let (json, rest) = split_json(args);
     let follow = rest.iter().any(|a| a == "-f" || a == "--follow");
     let rest: Vec<String> = rest.into_iter().filter(|a| a != "-f" && a != "--follow").collect();
@@ -1295,16 +1297,26 @@ fn cmd_log(args: &[String]) -> Result<i32> {
     let s = session::find(rest.first().map(|a| a.as_str()), &cwd()?)?;
     let net = s.path("net.log");
     let (mut events, mut off) = activity::net_events(&net, 0);
-    // the agent's tool calls and its test kernel boots: both come out of
-    // the VM with its state when it stops
+    // the agent's tool calls and its test kernel boots, as exported with
+    // the session's state
     let late_events = |s: &Session| {
         let mut v = activity::tool_events(s);
         v.extend(activity::boot_events(&s.path("state").join(crate::acrboot::RECORDS).join("boot.log")));
         v
     };
-    let tools = late_events(&s);
-    let seen: std::collections::HashSet<(u64, String, String)> = tools.iter().map(|e| (e.time.to_bits(), e.kind.clone(), e.detail.clone())).collect();
-    events.extend(tools);
+    // what an earlier run exported, then (while it runs) what the VM has
+    // now: the guest's files hold both, so drop what is already listed
+    let key = |e: &Event| (e.time.to_bits(), e.kind.clone(), e.detail.clone());
+    let mut seen = std::collections::HashSet::new();
+    let mut fresh = |v: Vec<Event>| -> Vec<Event> { v.into_iter().filter(|e| seen.insert(key(e))).collect() };
+    events.extend(fresh(late_events(&s)));
+    let mut live = s.is_running().then(activity::Live::default);
+    if let Some(l) = live.as_mut() {
+        match l.poll(&s) {
+            Ok(v) => events.extend(fresh(v)),
+            Err(e) => eprintln!("agentcracker: the agent's tool calls and test boots so far are not shown: {e}"),
+        }
+    }
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
     // dates only when the timeline spans more than one day
     let first = events.first().map(|e| e.time).unwrap_or(s.meta.created as f64);
@@ -1321,25 +1333,27 @@ fn cmd_log(args: &[String]) -> Result<i32> {
         emit(e);
     }
     if follow && s.is_running() {
+        let mut polled = Instant::now();
         loop {
             let running = s.is_running();
             let (mut new, o) = activity::net_events(&net, off);
             off = o;
+            // the agent's, read out of the VM every couple of seconds (a
+            // VM that cannot be reached for a moment is tried again later)
+            if let Some(l) = live.as_mut().filter(|_| running && polled.elapsed() >= Duration::from_secs(2)) {
+                polled = Instant::now();
+                new.extend(fresh(l.poll(&s).unwrap_or_default()));
+            }
             new.sort_by(|a, b| a.time.total_cmp(&b.time));
             new.iter().for_each(emit);
             if !running {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            std::thread::sleep(Duration::from_millis(250));
         }
-        let mut late: Vec<Event> = late_events(&s)
-            .into_iter()
-            .filter(|e| !seen.contains(&(e.time.to_bits(), e.kind.clone(), e.detail.clone())))
-            .collect();
+        // and whatever came after the last look, once the state is out
+        let mut late = fresh(late_events(&s));
         late.sort_by(|a, b| a.time.total_cmp(&b.time));
-        if !late.is_empty() && !json {
-            out!("-- the agent's tool calls and test boots during the session (copied out when it ends) --");
-        }
         late.iter().for_each(emit);
     } else if events.is_empty() && !json {
         eprintln!("no activity recorded for session {}", s.meta.id);

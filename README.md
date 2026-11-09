@@ -353,8 +353,8 @@ ext4 and tmpfs, which `acrboot --kconfig` includes.
   second.
 - **On record.**  Each boot is a line in the guest's
   `~/.local/state/acrboot/boot.log`, with its console (the first 4M, last
-  20 boots) beside it.  They come out with the session's state when the
-  VM stops, so each boot is a `boot` line in `agentcracker log`
+  20 boots) beside it, so each boot is a `boot` line in `agentcracker
+  log`, read out of the VM while it runs
   (`boot  PANIC  29M kernel, 1.3s: panic=0`).
 - **The host** must allow nested virtualisation: `kvm_intel` or `kvm_amd`
   with `nested=1` (the default on current kernels; check

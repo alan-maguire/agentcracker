@@ -1,15 +1,18 @@
 //! A session's activity as one timeline, for `agentcracker log`.
 //!
-//! Two sources are merged:
+//! Three sources are merged:
 //!
 //! - `net.log`, written by the egress proxy: one line per connection
 //!   attempt (`<unix time> <verdict> <host:port>`).  Live while the session
 //!   runs.
-//! - the agent's transcripts, copied out when the session ends: Claude
-//!   Code's (`.claude/projects/**/*.jsonl`) and Codex's session rollouts
-//!   (`.codex/sessions/**/rollout-*.jsonl`).  Every tool call the agent
-//!   made - shell commands, file reads and edits, fetches and searches -
-//!   with its time.
+//! - the agent's transcripts: Claude Code's (`.claude/projects/**/*.jsonl`)
+//!   and Codex's session rollouts (`.codex/sessions/**/rollout-*.jsonl`).
+//!   Every tool call the agent made - shell commands, file reads and
+//!   edits, fetches and searches - with its time.
+//! - `acrboot`'s `boot.log`: one line per test kernel boot.
+//!
+//! The last two are in the guest.  They are copied out with the session's
+//! state when it ends; while it runs, [`Live`] reads them out of the VM.
 //!
 //! Everything here comes from the guest and is untrusted: it is escaped
 //! for the terminal when rendered (see [`crate::util::safe_text`]).
@@ -61,9 +64,13 @@ pub fn net_events(path: &Path, from: u64) -> (Vec<Event>, u64) {
 /// The guest wrote it: malformed lines are skipped, and the text is
 /// escaped when rendered.
 pub fn boot_events(path: &Path) -> Vec<Event> {
+    std::fs::read(path).map(|b| boot_events_in(&b)).unwrap_or_default()
+}
+
+/// [`boot_events`] on the contents of a `boot.log`.
+fn boot_events_in(buf: &[u8]) -> Vec<Event> {
     let mut out = Vec::new();
-    let Ok(buf) = std::fs::read(path) else { return out };
-    for line in String::from_utf8_lossy(&buf).lines() {
+    for line in String::from_utf8_lossy(buf).lines() {
         let mut it = line.splitn(6, ' ');
         let (Some(t), Some(outcome), Some(secs), Some(size), Some(disks)) = (it.next(), it.next(), it.next(), it.next(), it.next()) else { continue };
         let (Ok(time), Ok(secs), Ok(size), Ok(disks)) = (t.parse::<f64>(), secs.parse::<f64>(), size.parse::<u64>(), disks.parse::<u32>()) else { continue };
@@ -82,6 +89,55 @@ pub fn boot_events(path: &Path) -> Vec<Event> {
         });
     }
     out
+}
+
+/// Reads the agent's tool calls and test boots out of a running session's
+/// VM, for `agentcracker log`.  The transcripts and `boot.log` are listed
+/// with their sizes, and each is read from where the last [`Live::poll`]
+/// stopped, as the user, over the connection `agentcracker shell` uses.
+/// Only complete lines are taken.  Everything read is the guest's and
+/// untrusted, parsed as strictly as the exported copies.
+#[derive(Default)]
+pub struct Live {
+    /// Bytes already read, per file (relative to the guest's `$HOME`).
+    offsets: std::collections::HashMap<String, u64>,
+}
+
+/// Most read from one file in one [`Live::poll`].
+const LIVE_READ_MAX: u64 = 64 << 20;
+
+impl Live {
+    /// The events in what the files gained since the last call (all of
+    /// them, the first time).  Errors if the VM cannot be reached.
+    pub fn poll(&mut self, s: &Session) -> crate::util::Result<Vec<Event>> {
+        let list = format!(
+            "cd && find .claude/projects .codex/sessions -type f -name '*.jsonl' -printf '%s %p\\n' 2>/dev/null; \
+             f={}/boot.log; [ -f \"$f\" ] && stat -c '%s %n' \"$f\"; true",
+            crate::acrboot::RECORDS
+        );
+        let listing = crate::vm::exec_capture(s, &["sh", "-c", &list], 4 << 20)?.unwrap_or_default();
+        let mut out = Vec::new();
+        for line in String::from_utf8_lossy(&listing).lines() {
+            let Some((size, path)) = line.split_once(' ') else { continue };
+            let Ok(size) = size.parse::<u64>() else { continue };
+            let off = self.offsets.get(path).copied().filter(|&o| o <= size).unwrap_or(0);
+            if size == off {
+                continue;
+            }
+            let want = (size - off).min(LIVE_READ_MAX);
+            let from = format!("+{}", off + 1);
+            let Some(mut buf) = crate::vm::exec_capture(s, &["tail", "-c", &from, "--", path], want as usize)? else { continue };
+            // complete lines only: the rest is read next time
+            buf.truncate(buf.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0));
+            self.offsets.insert(path.to_string(), off + buf.len() as u64);
+            if path.ends_with("/boot.log") {
+                out.extend(boot_events_in(&buf));
+            } else {
+                transcript_events_in(&buf, &mut out);
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// The agent's tool calls from the transcripts in the session's exported
@@ -109,8 +165,14 @@ pub fn tool_events(s: &Session) -> Vec<Event> {
 /// as Codex's format if it is a `response_item` envelope, else as Claude
 /// Code's.
 fn transcript_events(path: &Path, out: &mut Vec<Event>) {
-    let Ok(text) = std::fs::read_to_string(path) else { return };
-    for line in text.lines() {
+    if let Ok(b) = std::fs::read(path) {
+        transcript_events_in(&b, out);
+    }
+}
+
+/// [`transcript_events`] on (complete lines of) a transcript's contents.
+fn transcript_events_in(buf: &[u8], out: &mut Vec<Event>) {
+    for line in String::from_utf8_lossy(buf).lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let Some(time) = v.get("timestamp").and_then(|t| t.as_str()).and_then(parse_iso8601) else { continue };
         if v.get("type").and_then(|t| t.as_str()) == Some("response_item") {

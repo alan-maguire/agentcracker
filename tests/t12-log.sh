@@ -1,6 +1,7 @@
 #!/bin/bash
 # `agentcracker log`: one timeline of network requests and the agent's
-# tool calls, followed live with -f, as JSON with --json, and escaped.
+# tool calls, read out of the VM while it runs, followed live with -f, as
+# JSON with --json, and escaped.
 . "$(dirname "$0")/lib.sh"
 require_vm
 require_cmd curl
@@ -50,6 +51,24 @@ timeout 30 "$AC" log -f "$id" >"$WORK/follow.out" 2>&1
 rc=$?
 assert_eq "$rc" "0" "log -f ends by itself when the session does"
 assert_match "$(cat "$WORK/follow.out")" 'net +DENY +example\.org:443' "requests made while following are shown"
+
+step "a running session's tool calls are read out of its VM"
+cat >fixture/late.jsonl <<'JSON'
+{"type":"assistant","timestamp":"2026-11-06T15:43:00.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo late"}}]}}
+JSON
+id=$("$AC" --detach sh -c 'd=$HOME/.claude/projects/'"$key"'; mkdir -p $d ~/.local/state/acrboot && cp fixture/t.jsonl $d/
+    echo "1762443725 panic 1.3 30000000 1 panic=0" >> ~/.local/state/acrboot/boot.log
+    sleep 5; cat fixture/late.jsonl >> $d/t.jsonl; sleep 4' </dev/null)
+for _ in $(seq 75); do
+    out=$("$AC" log "$id" 2>&1)
+    [[ $out == *"make -j8"* ]] && break
+    sleep 0.2
+done
+assert_match "$out" '  bash +make -j8 …' "the agent's tool calls are shown while it runs"
+assert_match "$out" '  boot +PANIC +29M kernel, 1 disk, 1\.3s: panic=0' "and its test boots"
+timeout 40 "$AC" log -f "$id" >"$WORK/follow.out" 2>&1
+assert_eq "$(grep -c 'echo late' "$WORK/follow.out")" "1" "-f shows the calls made since, once"
+assert_eq "$(grep -c 'make -j8' "$WORK/follow.out")" "1" "and the earlier ones once"
 
 step "an empty timeline"
 ac_run true
