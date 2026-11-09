@@ -451,6 +451,12 @@ Without `--branch`, the commits are imported as `agentcracker/<id>`
   are not usr-merged are not supported.
 - **The first snapshot of a large tree** takes a while, especially
   without reflinks (see Quick start).
+- **Disk space**: sessions and build caches are kept until you remove
+  them, and each can grow to tens of GB.  What the guest sends the host
+  - its changes, its state, its console, its output when that goes to a
+  file - stops before the disk has less than 2G free (the session then
+  says so, and resuming it once there is room gets its changes); after a
+  session agentcracker warns when under 10G is left.
 - **Not implemented**: a live read-only share of the project, a real
   network device, three-way merges on apply, pre-booted VM snapshots
   for faster start.

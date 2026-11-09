@@ -612,3 +612,50 @@ pub fn git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
+
+/// Space kept free on any filesystem the host writes guest-driven output
+/// to (a session's change and state streams, its console log, the
+/// command's output when that goes to a file): writing stops below it, so
+/// a runaway or hostile guest cannot fill the host's disk.  The tests
+/// raise it with `AGENTCRACKER_MIN_FREE` (bytes) to see it work.
+pub const MIN_FREE: u64 = 2 << 30;
+
+/// [`MIN_FREE`], or `AGENTCRACKER_MIN_FREE` if set.
+fn min_free() -> u64 {
+    std::env::var("AGENTCRACKER_MIN_FREE").ok().and_then(|v| v.parse().ok()).unwrap_or(MIN_FREE)
+}
+
+/// Bytes the user can still write on the filesystem holding `fd`, or
+/// `None` if `fd` is not a regular file (a terminal or pipe has no space to
+/// run out of) or the filesystem cannot be asked.
+pub fn free_space(fd: std::os::fd::RawFd) -> Option<u64> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 || st.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return None;
+    }
+    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::fstatvfs(fd, &mut vfs) } == 0).then(|| vfs.f_bavail as u64 * vfs.f_frsize as u64)
+}
+
+/// Checks, as guest-driven output is written to a file, that its filesystem
+/// keeps [`MIN_FREE`]: every 64 MiB, so the check costs nothing.
+#[derive(Default)]
+pub struct SpaceGuard {
+    since: u64,
+}
+
+impl SpaceGuard {
+    /// Account for `n` more bytes about to be written to `fd`.  Errors once
+    /// the filesystem has less than [`MIN_FREE`] left.
+    pub fn allow(&mut self, fd: std::os::fd::RawFd, n: usize) -> Result<()> {
+        self.since += n as u64;
+        if self.since < 64 << 20 {
+            return Ok(());
+        }
+        self.since = 0;
+        match free_space(fd) {
+            Some(f) if f < min_free() => crate::bail!("less than {} free on the host's disk", human_bytes(min_free())),
+            _ => Ok(()),
+        }
+    }
+}

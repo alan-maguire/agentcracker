@@ -339,6 +339,9 @@ for conflicting text files.)
 
 ## Host-side hardening
 
+- What the guest sends the host - its changes, state, console and
+  output - is written to host files only while their filesystem keeps
+  2G free, so a runaway or hostile guest cannot fill the host's disk.
 - Firecracker runs **without the jailer**, which needs root: it is an
   ordinary process of the invoking user, confined by its seccomp filter
   (a per-thread syscall allowlist) and nothing else.  There is no chroot,

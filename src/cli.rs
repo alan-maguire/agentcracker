@@ -420,6 +420,23 @@ fn boot_and_review(s: &mut Session, cfg: &Config, cmd: &[String], console: bool,
     Ok(code)
 }
 
+/// Warn when the disk holding agentcracker's state (sessions, build caches)
+/// is getting full: sessions and caches are kept until removed, and each
+/// can grow to tens of GB.  `s`: the session just run.
+fn low_space_warning(s: &Session) {
+    let Ok(f) = std::fs::File::open(s.path("meta.json")) else { return };
+    use std::os::fd::AsRawFd;
+    if let Some(free) = crate::util::free_space(f.as_raw_fd()).filter(|&b| b < 10 << 30) {
+        let (own, _) = s.disk_usage();
+        eprintln!(
+            "agentcracker: only {} free on the disk holding sessions and build caches (this session uses {}); \
+             `agentcracker ls` and `rm`, and `agentcracker cache --drop`, free space",
+            human_bytes(free),
+            human_bytes(own)
+        );
+    }
+}
+
 /// Boot the session's VM once, running `cmd`, and record the result.
 ///
 /// Holds the session lock throughout (failing if the session is already
@@ -494,6 +511,7 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
         ));
     }
     s.save()?;
+    low_space_warning(s);
     crate::util::mark("post-processing");
     if out.exit_code.is_none() && !out.exported {
         eprintln!("agentcracker: the session ended abnormally; its disk is kept: agentcracker resume {} | show {}", s.meta.id, s.meta.id);

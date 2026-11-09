@@ -25,7 +25,7 @@
 //! snapshot, vde scratch.
 
 use std::io::{self, Write};
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -38,7 +38,7 @@ use crate::config::Config;
 use crate::images::{self, Refresh};
 use crate::proto::*;
 use crate::session::Session;
-use crate::util::{Context, Fnv, Result, home};
+use crate::util::{Context, Fnv, Result, SpaceGuard, home};
 
 /// What happened during one boot, for the caller to record in the session.
 pub struct Outcome {
@@ -601,7 +601,6 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
     crate::util::mark("home seed built");
     s.meta.cred_seed = hash_file(&home().join(credential_path(profile)));
 
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(s.path("console.log"))?;
     let mut fc_cmd = Command::new(&fc_bin);
     fc_cmd
         .arg("--no-api")
@@ -617,11 +616,17 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
     if let Ok(f) = images::find_asset("seccomp.bpf") {
         fc_cmd.arg("--seccomp-filter").arg(f);
     }
-    if console {
+    // firecracker writes the console to the file itself (a pipe would
+    // stall the guest's console, and its shutdown, if agentcracker died);
+    // a thread here keeps the file within bounds
+    let console_log = if console {
         fc_cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        None
     } else {
-        fc_cmd.stdout(log.try_clone()?).stderr(log);
-    }
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(s.path("console.log"))?;
+        fc_cmd.stdout(log.try_clone()?).stderr(log.try_clone()?);
+        Some(bound_console(log))
+    };
     let t0 = Instant::now();
     let mut fc = fc_cmd.spawn().ctx(format!("starting {}", fc_bin.display()))?;
 
@@ -643,6 +648,10 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         let _ = fc.kill();
         let _ = fc.wait();
     }
+    if let Some((stop, t)) = console_log {
+        stop.store(true, Ordering::Relaxed);
+        let _ = t.join();
+    }
     let _ = std::fs::remove_dir_all(&rundir);
     s.meta.runtime += t0.elapsed().as_secs();
     s.meta.boots += 1;
@@ -650,6 +659,47 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         Ok(o) => Ok(o),
         Err(e) => Ok(Outcome { exit_code: None, exported: false, error: Some(e.0) }),
     }
+}
+
+/// Most of a boot's console output kept in `console.log`; the rest is
+/// dropped (the guest kernel's console is for diagnosis, and only a guest
+/// kernel gone wrong says this much).
+const CONSOLE_MAX: u64 = 16 << 20;
+
+/// Keep a boot's console output in `console.log` (`log`, which
+/// Firecracker appends to) within bounds: a thread checks it twice a second
+/// and cuts it back to [`CONSOLE_MAX`] more than it had when the boot
+/// started - or to that, if the disk is nearly full
+/// ([`crate::util::MIN_FREE`]) - ending it with a note that the rest was
+/// dropped.  Returns the flag that stops the thread, and the thread.
+fn bound_console(log: std::fs::File) -> (Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let t = std::thread::spawn(move || {
+        const NOTE: &[u8] = b"\n[agentcracker: the rest of this boot's console output was dropped]\n";
+        let start = log.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut guard = SpaceGuard::default();
+        let (mut last, mut cut) = (start, false);
+        loop {
+            let done = flag.load(Ordering::Relaxed);
+            let len = log.metadata().map(|m| m.len()).unwrap_or(0);
+            let full = guard.allow(log.as_raw_fd(), len.saturating_sub(last) as usize).is_err();
+            let limit = if full { start } else { start + CONSOLE_MAX };
+            if len > limit + if cut { NOTE.len() as u64 } else { 0 } {
+                cut = true;
+                // (the note is appended after the cut, so later output -
+                // appended after it - is what the next cut removes)
+                let _ = log.set_len(limit);
+                let _ = (&log).write_all(NOTE);
+            }
+            last = log.metadata().map(|m| m.len()).unwrap_or(0);
+            if done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    });
+    (stop, t)
 }
 
 /// Drive the control protocol for one boot (see the module docs) and copy
@@ -711,6 +761,14 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
     let mut changes: Option<std::fs::File> = None;
     let mut state: Option<std::fs::File> = None;
     let mut err = None;
+    // what the guest sends stops before it fills the host's disk (see
+    // util::MIN_FREE): its output, if that goes to a file, is then
+    // dropped; its changes and state end the session with an error
+    let (mut out_guard, mut err_guard, mut stream_guard) = <(SpaceGuard, SpaceGuard, SpaceGuard)>::default();
+    let mut dropping = [false; 2];
+    let full = |what: &str, e: crate::util::Error| {
+        format!("{e}: stopped receiving {what}; free some space, then `agentcracker resume` the session to get them")
+    };
     loop {
         let (t, d) = match read_frame(&mut rd) {
             Ok(f) => f,
@@ -722,14 +780,25 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
             }
         };
         match t {
-            M_STDOUT => {
-                let _ = out.write_all(&d);
-                let _ = out.flush();
-            }
-            M_STDERR => {
-                let mut e = std::io::stderr().lock();
-                let _ = e.write_all(&d);
-                let _ = e.flush();
+            M_STDOUT | M_STDERR => {
+                let i = (t == M_STDERR) as usize;
+                let g = if i == 0 { &mut out_guard } else { &mut err_guard };
+                if !dropping[i] {
+                    if let Err(e) = g.allow(1 + i as i32, d.len()) {
+                        dropping[i] = true;
+                        eprintln!("agentcracker: {e}: the rest of the command's {} is dropped", ["output", "error output"][i]);
+                    }
+                }
+                if !dropping[i] {
+                    if i == 0 {
+                        let _ = out.write_all(&d);
+                        let _ = out.flush();
+                    } else {
+                        let mut e = std::io::stderr().lock();
+                        let _ = e.write_all(&d);
+                        let _ = e.flush();
+                    }
+                }
             }
             M_READY => crate::util::mark("guest command started"),
             M_ERROR => {
@@ -747,7 +816,14 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
                 if changes.is_none() {
                     changes = Some(std::fs::File::create(s.path("changes.stream.tmp"))?);
                 }
-                changes.as_mut().unwrap().write_all(&d)?;
+                let f = changes.as_mut().unwrap();
+                if let Err(e) = stream_guard.allow(f.as_raw_fd(), d.len()) {
+                    drop(changes.take());
+                    let _ = std::fs::remove_file(s.path("changes.stream.tmp"));
+                    err = Some(full("the session's changes", e));
+                    break;
+                }
+                f.write_all(&d)?;
             }
             M_EXPORT_END => {
                 if let Some(f) = changes.take() {
@@ -760,7 +836,14 @@ fn attach(s: &Session, l: &UnixListener, fc: &mut Child, g: &GuestConfig, seed: 
                 if state.is_none() {
                     state = Some(std::fs::File::create(s.path("state.stream.tmp"))?);
                 }
-                state.as_mut().unwrap().write_all(&d)?;
+                let f = state.as_mut().unwrap();
+                if let Err(e) = stream_guard.allow(f.as_raw_fd(), d.len()) {
+                    drop(state.take());
+                    let _ = std::fs::remove_file(s.path("state.stream.tmp"));
+                    err = Some(full("the agent's state", e));
+                    break;
+                }
+                f.write_all(&d)?;
             }
             M_STATE_END => {
                 if state.take().is_some() {
@@ -932,4 +1015,33 @@ fn exec_connect(s: &Session) -> Result<UnixStream> {
         crate::bail!("the guest is not accepting connections yet");
     }
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn console_is_cut_at_its_limit() {
+        let dir = std::env::temp_dir().join(format!("ac-console-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("console.log");
+        std::fs::write(&p, b"earlier boot\n").unwrap();
+        let open = || std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        let (stop, t) = bound_console(open());
+        // as a guest kernel flooding its console would, in a few bursts
+        let mut fc = open();
+        for _ in 0..3 {
+            fc.write_all(&vec![b'x'; (CONSOLE_MAX / 2 + 1) as usize]).unwrap();
+            std::thread::sleep(Duration::from_millis(700));
+        }
+        stop.store(true, Ordering::Relaxed);
+        t.join().unwrap();
+        let got = std::fs::read(&p).unwrap();
+        let note = b"[agentcracker: the rest of this boot's console output was dropped]\n";
+        assert!(got.starts_with(b"earlier boot\n"), "earlier boots' output is kept");
+        assert!(got.ends_with(note), "and the cut is noted");
+        assert_eq!(got.len() as u64, 13 + CONSOLE_MAX + 1 + note.len() as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

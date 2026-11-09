@@ -1,6 +1,7 @@
 #!/bin/bash
-# A hostile guest: it must not be able to plant credentials on the host or
-# drive the user's terminal through anything agentcracker prints.
+# A hostile guest: it must not be able to plant credentials on the host,
+# drive the user's terminal through anything agentcracker prints, or fill
+# the host's disk.
 . "$(dirname "$0")/lib.sh"
 require_vm
 
@@ -103,5 +104,18 @@ assert_contains "$AC_OUT" "400" "a CONNECT target with control characters is rej
 has_esc "$(cat "$(session_dir "$SID")/net.log")" && fail "net.log holds raw escapes" || pass "net.log is sanitised"
 ac show "$SID"
 has_esc "$AC_OUT" && fail "show prints a raw escape from net.log" || pass "show prints the bad target escaped"
+
+step "the guest cannot fill the host's disk"
+# (a free-space floor no disk meets, so the guard trips at its first check)
+export AGENTCRACKER_MIN_FREE=$((1 << 62))
+ac_run sh -c 'head -c 100M /dev/zero; echo done >&2'
+assert_contains "$AC_ERR" "the rest of the command's output is dropped" "output to a file stops"
+[ "$(stat -c %s "$WORK/last.out")" -lt $((100 << 20)) ] && pass "short of all 100M" || fail "all of the output was written"
+ac_run sh -c 'head -c 100M /dev/urandom > big'
+assert_contains "$AC_ERR" "stopped receiving the session's changes" "a change stream stops too"
+assert_no_file "$(session_dir "$SID")/changes.stream.tmp" "and what was received is removed"
+unset AGENTCRACKER_MIN_FREE
+ac resume "$SID" true
+assert_contains "$AC_ERR" "1 file changed: 1 added" "resumed with room, the session's changes come through"
 
 finish
