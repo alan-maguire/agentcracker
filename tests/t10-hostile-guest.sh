@@ -1,7 +1,7 @@
 #!/bin/bash
 # A hostile guest: it must not be able to plant credentials on the host,
-# drive the user's terminal through anything agentcracker prints, or fill
-# the host's disk.
+# drive the user's terminal through anything agentcracker prints, fill
+# the host's disk, or find much of the host if it escaped into Firecracker.
 . "$(dirname "$0")/lib.sh"
 require_vm
 
@@ -134,5 +134,35 @@ for i in $(seq 200); do exec {fd}<>/dev/tcp/127.0.0.1/$port || break; done
 sleep 1'
 assert_contains "$AC_OUT" "HTTP/1.1 400" "a request line without an end is refused"
 assert_contains "$(cat "$(session_dir "$SID")/net.log")" "DENY(too many)" "connections beyond the limit are refused"
+
+step "Firecracker runs in a sandbox of its own"
+id=$("$AC" --detach sh -c 'sleep 30' </dev/null)
+pid=
+for _ in $(seq 100); do
+    pid=$(pgrep -f -- "--id agentcracker-$id" | head -1)
+    [ -n "$pid" ] && break   # (the command line is Firecracker's only after exec)
+    sleep 0.1
+done
+[ -n "$pid" ] || die "no firecracker process for $id"
+root=/proc/$pid/root
+assert_ne "$(readlink /proc/$pid/ns/user)" "$(readlink /proc/self/ns/user)" "in a user namespace of its own"
+assert_ne "$(readlink /proc/$pid/ns/net)" "$(readlink /proc/self/ns/net)" "with no network"
+[ -e "$root$PWD" ] && fail "the project is visible to Firecracker" || pass "the project is not visible"
+# only what is mounted there, the directories on the way to it, and the
+# /lib links into /usr
+mounts=$(awk '{print $5}' /proc/$pid/mountinfo)
+extra=
+for d in / "$HOME/"; do
+    for e in $(ls -A "$root$d"); do
+        [ -L "$root$d$e" ] || grep -q "^$d$e\(/\|\$\)" <<<"$mounts" || extra+="$d$e "
+    done
+done
+assert_eq "$extra" "" "nothing else of the host's tree is visible"
+[ -c "$root/dev/kvm" ] && pass "/dev/kvm is there" || fail "/dev/kvm is missing"
+assert_match "$(grep ' ro[ ,]' /proc/$pid/mountinfo)" "$(session_dir "$id")/lower.img" "the project snapshot is read-only"
+assert_match "$(grep -E ' rw[ ,]' /proc/$pid/mountinfo)" "$(session_dir "$id")/scratch.img" "the scratch disk is writable"
+assert_match "$(grep '^Max core file size' /proc/$pid/limits)" ' 0 +0 ' "no core dumps"
+assert_match "$(grep NoNewPrivs /proc/$pid/status)" '1$' "no_new_privs is set"
+"$AC" stop "$id" >/dev/null 2>&1
 
 finish

@@ -53,7 +53,8 @@ cargo doc --document-private-items --open
   host CLI, `cli::run`.  So host and guest always agree on the protocol
   and stream formats, which live in shared code (`src/proto.rs`).
 - **Firecracker** runs as the invoking user, without the jailer, with a
-  seccomp filter compiled at build time.  It is started with `--no-api`
+  seccomp filter compiled at build time, in namespaces and on a root of
+  its own (`src/jail.rs`).  It is started with `--no-api`
   and a JSON config file.  agentcracker never talks to its API socket.
 - **The guest kernel** is built from source by the Makefile (see "The guest
   kernel" in `README.md`).  It has no modules and no initramfs.
@@ -436,7 +437,7 @@ reaches the host, and how each one is handled:
 | Secrets in the snapshots | The project snapshot's `.git/config` has `user:token@` stripped from URLs and `extraheader` lines dropped; the toolchain snapshot excludes cargo, npm, PyPI, netrc and git credential files; new sessions warn about credential-like project files (`images::credential_like`). |
 | Network | No NIC; HTTPS `CONNECT` only, to allowlisted hosts (port 443 unless `host:port` is listed); DNS resolved on the host; decisions logged. |
 | Test kernels (`acrboot`) | Off unless the user's config says `boot = true` (a project's cannot); otherwise the host hides VMX and SVM from the guest (a Firecracker CPU template: its KVM then refuses VMXON and EFER.SVME), so a guest kernel the agent took over cannot reach the host's nested-virtualisation code either, and acinit removes `/dev/kvm`; with it acinit makes `/dev/kvm` the user's.  Nothing runs on the host: the test VM is a Firecracker nested in the session's VM (its CPUs, memory and disk), with no network and no vsock, killed on timeout, a few seconds after a panic, and with the session.  The agent controls that VM's kernel, and the host's KVM handles its exits first, so the boundary there is the host's nested-virtualisation code against ring 0.  Its records reach the host as state (`boot.log` lines parsed strictly and escaped when shown, consoles capped at 4M × 20). |
-| Firecracker | Runs as the user, with the compiled seccomp filter.  **No jailer**: it needs root, which conflicts with the rootless goal, so there is no chroot or cgroup limit around the VMM. |
+| Firecracker | Runs as the user, with the compiled seccomp filter.  **No jailer** (it needs root, which conflicts with the rootless goal); instead `jail.rs` builds the same without privileges, between fork and exec: new user (own uid only), mount, network, IPC, UTS and cgroup namespaces; `pivot_root` onto a tmpfs holding only the binary and system libraries, the kernel, the session's disks (read-only except scratch and the cache), the runtime directory and `/dev/kvm`; `no_new_privs`, no core dumps, at most 4096 files.  If the namespaces are refused, it runs without them, with a warning.  No cgroup limit yet.  t10 checks what Firecracker can see. |
 
 What goes into the guest is limited too.  `/etc` is copied from an
 allowlist (`images::ETC_ALLOW`), toolchain roots never include
@@ -459,6 +460,7 @@ All source is in `src/`.
 | `erofs.rs` | The EROFS writer: in-memory tree, host walk, image layout, reflink copy. |
 | `vm.rs` | Firecracker config and launch, home seed, guest environment, terminal attach. |
 | `proxy.rs` | Host side of the egress proxy. |
+| `jail.rs` | Firecracker's sandbox: namespaces, its own root, limits. |
 | `proto.rs` | vsock frames and the file stream encoder/decoder. |
 | `guest.rs` | acinit: mounts, overlays, seed, proxy relay, command, export, poweroff. |
 | `agent.rs` | Agent profiles (Claude Code, Codex): hosts, seeded files, login, state, environment. |
@@ -612,6 +614,12 @@ output capped), and parses that the same way.
   session's VM over the exec port (§3.5), attached or with the output
   collected.
 
+### `jail.rs`
+- `Jail::new`: prepare the steps (directories, binds and their flags,
+  links, uid map) before fork; `Jail::enter`: run them in the child,
+  system calls only.
+- `limit`: `no_new_privs` and rlimits, sandboxed or not.
+
 ### `proxy.rs`
 - `serve` and `handle`: accept vsock-forwarded connections, apply
   policy, tunnel.
@@ -683,7 +691,7 @@ output capped), and parses that the same way.
   | `t07-network.sh` | proxy policy, `--no-net`, logging |
   | `t08-branch.sh` | branch import |
   | `t09-sessions.sh` | listing, lookup, show, removal |
-  | `t10-hostile-guest.sh` | credentials, terminal escapes, secrets in snapshots |
+  | `t10-hostile-guest.sh` | credentials, terminal escapes, secrets in snapshots, the host's disk, the proxy's limits, Firecracker's sandbox |
   | `t11-orchestration.sh` | `--detach`, `wait`, `stop`, `--json`, shells in a running session |
   | `t12-log.sh` | `log`: network and tool-call timeline, read live from a running VM, `-f`, `--json`, escaping |
   | `t13-profiles.sh` | agent profiles: Codex seeding, login, environment, transcripts, selection |

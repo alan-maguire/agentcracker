@@ -49,6 +49,7 @@ mod gitimport;
 mod guidance;
 mod guest;
 mod images;
+mod jail;
 mod proto;
 mod proxy;
 mod session;

@@ -28,6 +28,7 @@ use std::io::{self, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -631,34 +632,62 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
     crate::util::mark("home seed built");
     s.meta.cred_seed = hash_file(&home().join(credential_path(profile)));
 
-    let mut fc_cmd = Command::new(&fc_bin);
-    fc_cmd
-        .arg("--no-api")
-        .arg("--config-file")
-        .arg(&cfg_path)
-        .arg("--id")
-        .arg(format!("agentcracker-{}", s.meta.id))
-        .arg("--level")
-        .arg(std::env::var("AGENTCRACKER_FC_LOG").unwrap_or_else(|_| "Error".into()))
-        .stdin(Stdio::null());
-    // firecracker's own x86_64 policy, compiled at install time (gnu builds
-    // otherwise default to an allow-all filter)
-    if let Ok(f) = images::find_asset("seccomp.bpf") {
-        fc_cmd.arg("--seccomp-filter").arg(f);
-    }
+    let seccomp = images::find_asset("seccomp.bpf").ok();
+    // Firecracker's sandbox (see crate::jail): what it may see
+    let mut ro: Vec<&Path> = vec![&fc_bin, &vmlinux, &base, &usr, &tools_img, &lower];
+    ro.extend(lower_delta.as_deref());
+    ro.extend(seccomp.as_deref());
+    let mut rw: Vec<&Path> = vec![&scratch, &rundir];
+    rw.extend(cache.as_ref().map(|c| c.image.as_path()));
+    let jail = Arc::new(crate::jail::Jail::new(&rundir.join("root"), &ro, &rw)?);
     // firecracker writes the console to the file itself (a pipe would
     // stall the guest's console, and its shutdown, if agentcracker died);
     // a thread here keeps the file within bounds
-    let console_log = if console {
-        fc_cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    let log = if console {
         None
     } else {
-        let log = std::fs::OpenOptions::new().create(true).append(true).open(s.path("console.log"))?;
-        fc_cmd.stdout(log.try_clone()?).stderr(log.try_clone()?);
-        Some(bound_console(log))
+        Some(std::fs::OpenOptions::new().create(true).append(true).open(s.path("console.log"))?)
+    };
+    let spawn = |jail: Option<Arc<crate::jail::Jail>>| -> io::Result<Child> {
+        let mut c = Command::new(&fc_bin);
+        c.arg("--no-api")
+            .arg("--config-file")
+            .arg(&cfg_path)
+            .arg("--id")
+            .arg(format!("agentcracker-{}", s.meta.id))
+            .arg("--level")
+            .arg(std::env::var("AGENTCRACKER_FC_LOG").unwrap_or_else(|_| "Error".into()))
+            .stdin(Stdio::null());
+        // firecracker's own x86_64 policy, compiled at install time (gnu
+        // builds otherwise default to an allow-all filter)
+        if let Some(f) = &seccomp {
+            c.arg("--seccomp-filter").arg(f);
+        }
+        match &log {
+            Some(l) => c.stdout(l.try_clone()?).stderr(l.try_clone()?),
+            None => c.stdout(Stdio::inherit()).stderr(Stdio::inherit()),
+        };
+        // (only system calls between fork and exec: see crate::jail)
+        unsafe {
+            c.pre_exec(move || {
+                if let Some(j) = &jail {
+                    j.enter()?;
+                }
+                crate::jail::limit()
+            });
+        }
+        c.spawn()
     };
     let t0 = Instant::now();
-    let mut fc = fc_cmd.spawn().ctx(format!("starting {}", fc_bin.display()))?;
+    let mut fc = match spawn(Some(jail)) {
+        Ok(fc) => fc,
+        Err(e) => {
+            // e.g. unprivileged user namespaces are not allowed here
+            eprintln!("agentcracker: running Firecracker without its sandbox ({e})");
+            spawn(None).ctx(format!("starting {}", fc_bin.display()))?
+        }
+    };
+    let console_log = log.map(bound_console);
 
     crate::util::mark("firecracker spawned");
     let res = attach(s, &ctrl_l, &mut fc, &gcfg, &seed, tty);

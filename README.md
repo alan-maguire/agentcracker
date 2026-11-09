@@ -506,7 +506,14 @@ $PREFIX/lib/agentcracker/{acinit,firecracker,vmlinux,seccomp.bpf}
 
 **Firecracker** runs as you, without the jailer (which needs root),
 under a seccomp filter `make` compiles from Firecracker's own policy
-with the glibc spellings of its syscalls added.
+with the glibc spellings of its syscalls added.  It runs in a sandbox
+built without privileges: new user, mount and network namespaces, on a
+root holding only its binary and libraries, the kernel, the session's
+disk images, its runtime directory and `/dev/kvm` - no home directory,
+no project, no network - with no core dumps and no privilege gain on
+exec.  Where unprivileged user namespaces are not allowed (Ubuntu 24.04
+and later restrict them through AppArmor, for example), agentcracker
+says `running Firecracker without its sandbox` and runs it as before.
 
 ### The guest kernel
 

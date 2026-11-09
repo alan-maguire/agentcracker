@@ -347,12 +347,27 @@ for conflicting text files.)
 - Nor can it exhaust the host through the proxy: at most 128
   connections at a time, request lines and headers read at most 8K at a
   time, and `net.log` written only while its disk has room.
-- Firecracker runs **without the jailer**, which needs root: it is an
-  ordinary process of the invoking user, confined by its seccomp filter
-  (a per-thread syscall allowlist) and nothing else.  There is no chroot,
-  cgroup or namespace around it, so a guest that escaped into the VMM
-  would have that user's access to the host.  Wrapping it in a user
-  namespace or Landlock is a possible future step.
+- Firecracker runs **without the jailer**, which needs root, but in the
+  same kind of sandbox built without privileges: a user namespace
+  mapping only the user's own uid (so nothing needs root and files keep
+  their owner) carries new mount, network, IPC, UTS and cgroup
+  namespaces, and its root is an empty tmpfs holding only what it uses -
+  its binary and the system libraries, the kernel, the session's disks
+  (read-only except scratch and the build cache), its runtime directory
+  and `/dev/kvm`.  On top come its seccomp filter (a per-thread syscall
+  allowlist), `no_new_privs`, no core dumps (they would hold guest
+  memory) and a bounded number of open files.  A guest that escaped into
+  the VMM would find no home directory, no project and no network: it
+  could write the session's own scratch and cache disks, reach the vsock
+  sockets agentcracker already serves the guest, and use `/dev/kvm`.
+  Where unprivileged user namespaces are not allowed, Firecracker runs
+  without the namespaces (with the rest), and agentcracker says so.  The
+  host side of agentcracker - the proxy, applying changes, importing
+  commits - is not sandboxed: it needs the network and the project; it
+  treats what the guest sends as hostile input instead.  There is no
+  cgroup limit yet (Firecracker's memory is mostly the guest's, which is
+  fixed), and no Landlock (unprivileged, but not enabled in every
+  kernel).
 - No TAP device, no bridge, no iptables - so no root.  `/dev/kvm`
   access is the only requirement.
 - With `boot = true`, the guest also gets nested virtualisation, so
