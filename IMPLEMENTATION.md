@@ -3,8 +3,8 @@
 This document describes how agentcracker works today, as code: the pieces,
 how a session flows through them, the formats they share, where the
 security boundaries are, and a guide to the source files.  `README.md`
-covers the design, its rationale and the alternatives considered.  This
-file covers the mechanics.
+covers using it, and `DESIGN.md` the design, its rationale and the
+alternatives considered.  This file covers the mechanics.
 
 Every source file opens with a module comment, and every function, type
 and constant has a doc comment covering its behaviour, parameters and
@@ -55,8 +55,8 @@ cargo doc --document-private-items --open
 - **Firecracker** runs as the invoking user, without the jailer, with a
   seccomp filter compiled at build time.  It is started with `--no-api`
   and a JSON config file.  agentcracker never talks to its API socket.
-- **The guest kernel** is built from source by the Makefile (see "Kernel"
-  in `README.md`).  It has no modules and no initramfs.
+- **The guest kernel** is built from source by the Makefile (see "The guest
+  kernel" in `README.md`).  It has no modules and no initramfs.
 - **Images** are EROFS, written by agentcracker itself (`src/erofs.rs`),
   and cached under `~/.cache/agentcracker`.  The **scratch disk** is a
   sparse ext4 file per session.  The only other writable device is the
