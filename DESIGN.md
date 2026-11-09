@@ -344,6 +344,9 @@ for conflicting text files.)
   while the filesystem keeps 2G free, and its own disks (sparse files it
   grows by writing to them) stop growing because the session is stopped
   at the same point, and does not start below it.
+- Nor can it exhaust the host through the proxy: at most 128
+  connections at a time, request lines and headers read at most 8K at a
+  time, and `net.log` written only while its disk has room.
 - Firecracker runs **without the jailer**, which needs root: it is an
   ordinary process of the invoking user, confined by its seccomp filter
   (a per-thread syscall allowlist) and nothing else.  There is no chroot,

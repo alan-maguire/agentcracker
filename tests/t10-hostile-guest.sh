@@ -124,4 +124,15 @@ assert_contains "$AC_ERR" "free on the disk holding sessions" "saying why"
 unset AGENTCRACKER_MIN_FREE_SESSION
 # (stopping a running session that gets there: a unit test, vm.rs)
 
+step "the proxy bounds what a guest can make the host hold"
+ac_run bash -c '
+port=${HTTPS_PROXY##*:}
+exec 3<>/dev/tcp/127.0.0.1/$port
+head -c 1000000 /dev/zero | tr "\0" A >&3
+timeout 5 head -c 12 <&3; echo
+for i in $(seq 200); do exec {fd}<>/dev/tcp/127.0.0.1/$port || break; done
+sleep 1'
+assert_contains "$AC_OUT" "HTTP/1.1 400" "a request line without an end is refused"
+assert_contains "$(cat "$(session_dir "$SID")/net.log")" "DENY(too many)" "connections beyond the limit are refused"
+
 finish

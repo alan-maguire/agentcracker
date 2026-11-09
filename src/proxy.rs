@@ -21,16 +21,29 @@
 //!
 //! Every decision is appended to the session's `net.log` as
 //! `<unix time> <verdict> <host:port>`; `agentcracker show` summarises it.
-//! Each connection is served on its own thread.
+//! Each connection is served on its own thread, at most [`MAX_CONNS`] at a
+//! time; request lines and headers are read at most [`MAX_LINE`] bytes at
+//! a time; and `net.log` stops growing when its disk is nearly full - so
+//! a guest cannot exhaust the host's threads, memory or disk through it.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::host_allowed;
+use crate::util::SpaceGuard;
+
+/// Most connections served at once; more are closed as they arrive (and
+/// logged as `DENY(too many)`).  Package managers and agents open a few
+/// dozen; each one here is a host thread or two.
+const MAX_CONNS: usize = 128;
+
+/// Longest request line or header line read: CONNECT heads are short.
+const MAX_LINE: u64 = 8192;
 
 /// Per-session proxy settings, shared by all connection threads.
 pub struct Proxy {
@@ -38,9 +51,10 @@ pub struct Proxy {
     pub allow: Vec<String>,
     /// False with `--no-net`: every request is denied (and logged).
     pub enabled: bool,
-    /// `net.log`, or `None` if it could not be opened.  The mutex keeps lines
-    /// from different connections from interleaving.
-    pub log: Mutex<Option<std::fs::File>>,
+    /// `net.log` and the guard on its disk space, or `None` if it could
+    /// not be opened.  The mutex keeps lines from different connections
+    /// from interleaving.
+    pub log: Mutex<Option<(std::fs::File, SpaceGuard)>>,
 }
 
 /// Accept proxy connections on `listener` in a background thread, serving
@@ -51,14 +65,37 @@ pub struct Proxy {
 /// run until the process exits.
 pub fn serve(listener: UnixListener, p: Arc<Proxy>) {
     std::thread::spawn(move || {
+        let live = Arc::new(AtomicUsize::new(0));
         for c in listener.incoming() {
             let Ok(c) = c else { continue };
-            let p = p.clone();
+            if live.load(Ordering::Relaxed) >= MAX_CONNS {
+                log(&p, "DENY(too many)", "-");
+                continue;
+            }
+            live.fetch_add(1, Ordering::Relaxed);
+            let (p, live) = (p.clone(), live.clone());
             std::thread::spawn(move || {
                 let _ = handle(c, &p);
+                live.fetch_sub(1, Ordering::Relaxed);
             });
         }
     });
+}
+
+/// Read one line from `r` into `line`, reading at most [`MAX_LINE`] bytes.
+/// Returns false at EOF.  A longer line is answered with 400 and the rest
+/// of what the client sends is read and discarded (closing with it unread
+/// can leave the guest's sender blocked) until it closes or goes quiet,
+/// which also returns false.
+fn read_line(r: &mut BufReader<UnixStream>, line: &mut String) -> io::Result<bool> {
+    let n = r.by_ref().take(MAX_LINE + 1).read_line(line)?;
+    if n as u64 > MAX_LINE {
+        let mut w = r.get_ref().try_clone()?;
+        w.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+        let _ = io::copy(r, &mut io::sink());
+        return Ok(false);
+    }
+    Ok(n > 0)
 }
 
 /// Append one decision to `net.log` as `<now> <verdict> <target>`.
@@ -70,16 +107,20 @@ fn log(p: &Proxy, verdict: &str, target: &str) {
     // the target is the guest's text; net.log is shown by `agentcracker show`
     let target = &crate::util::safe_text(target.as_bytes(), false).replace(' ', "\\x20");
     if let Ok(mut g) = p.log.lock() {
-        if let Some(f) = g.as_mut() {
-            let _ = writeln!(f, "{} {verdict} {target}", crate::util::now());
+        if let Some((f, guard)) = g.as_mut() {
+            use std::os::fd::AsRawFd;
+            let line = format!("{} {verdict} {target}\n", crate::util::now());
+            if guard.allow(f.as_raw_fd(), line.len()).is_ok() {
+                let _ = f.write_all(line.as_bytes());
+            }
         }
     }
 }
 
 /// Serve one proxied connection from the guest.
 ///
-/// Reads the request line and headers (30 s read timeout; a header line
-/// over 8 KiB ends the connection), applies the policy described in the
+/// Reads the request line and headers (30 s read timeout; a line over
+/// [`MAX_LINE`] is answered with 400), applies the policy described in the
 /// module docs, and on success relays bytes in both directions until both
 /// sides have closed, half-closing each direction as its source reaches
 /// EOF.  Bytes the client sent right after the request head (e.g. an
@@ -94,15 +135,17 @@ fn handle(c: UnixStream, p: &Proxy) -> io::Result<()> {
     c.set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut r = BufReader::new(c.try_clone()?);
     let mut line = String::new();
-    r.read_line(&mut line)?;
-    // drain headers
-    loop {
+    if !read_line(&mut r, &mut line)? {
+        return Ok(());
+    }
+    // drain headers (at most a hundred: a CONNECT has a few)
+    for i in 0.. {
         let mut h = String::new();
-        if r.read_line(&mut h)? == 0 || h == "\r\n" || h == "\n" {
-            break;
-        }
-        if h.len() > 8192 {
+        if i == 100 || !read_line(&mut r, &mut h)? {
             return Ok(());
+        }
+        if h == "\r\n" || h == "\n" {
+            break;
         }
     }
     let mut w = c;

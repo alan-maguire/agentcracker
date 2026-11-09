@@ -517,7 +517,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
     let proxy = Arc::new(crate::proxy::Proxy {
         allow: s.meta.allow.clone(),
         enabled: net,
-        log: Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(s.path("net.log")).ok()),
+        log: Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(s.path("net.log")).ok().map(|f| (f, SpaceGuard::default()))),
     });
     crate::proxy::serve(proxy_l, proxy);
 
