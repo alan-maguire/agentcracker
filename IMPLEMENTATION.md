@@ -670,7 +670,7 @@ output capped), and parses that the same way.
 
   | Script | Area |
   |---|---|
-  | `t00-cli.sh` | usage and errors, no VM needed |
+  | `t00-cli.sh` | usage and errors, every subcommand documented in --help, the man page and the README; no VM needed |
   | `t01-boot.sh` | guest environment, identity, paths, isolation |
   | `t02-timing.sh` | startup and teardown time |
   | `t03-changes.sh` | change capture, summary, listing, diff |
@@ -735,6 +735,15 @@ output capped), and parses that the same way.
   (its key includes acinit's mtime) is used on the next boot.
 - **A new `GuestConfig` field**: give it a default (the struct is
   `Default`) and fill it in `vm::boot`.
+- **A new subcommand**: write `cmd_<name>(args: &[String]) ->
+  Result<i32>` in `cli.rs`, parsing its arguments with `parse_args`
+  (its options, and how many other arguments it takes) and finding
+  sessions with `session::find` or `sessions_from`; add it to the
+  `match` in `cli::run`.  Then document it in `cli::USAGE`, the man
+  page's COMMANDS and the README's command list (`t00-cli.sh` fails if
+  one of the three misses it), add a test, and list it in the `cli.rs`
+  source guide above.  To look inside a running session, use `vm::exec_capture`
+  rather than a new protocol frame.
 - **A new config key**: add it to `config::File` and `Config`, and merge
   it in `Config::merge` (scalars override, lists append).  Mention it in
   `cli::USAGE` and the README.

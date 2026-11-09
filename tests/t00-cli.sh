@@ -32,6 +32,19 @@ ac log --bogus
 assert_rc 1 "an unknown option fails"
 assert_contains "$AC_ERR" "log: unknown option --bogus" "naming the subcommand and the option"
 
+step "every subcommand is documented"
+# the names cli::run dispatches to a cmd_ function
+cmds=$(sed -n '/^pub fn run(/,/^}/p' "$REPO/src/cli.rs" | grep -E '=> cmd_' | grep -oE '^ +"[a-z][a-z-]*"' | tr -d ' "')
+[ -n "$cmds" ] && pass "found the subcommands in cli.rs: $(echo $cmds)" || fail "no subcommands found in cli.rs"
+ac --help
+undocumented=
+for c in $cmds; do
+    grep -qE "agentcracker $c( |$)" <<<"$AC_OUT" || undocumented+=" $c(--help)"
+    grep -qE "^\.BR? $c( |$)" "$REPO/man/agentcracker.1" || undocumented+=" $c(man)"
+    grep -qE "agentcracker $c( |$)" "$REPO/README.md" || undocumented+=" $c(README)"
+done
+assert_eq "$undocumented" "" "each is in --help, the man page and the README"
+
 step "empty session store"
 mkdir -p "$WORK/empty" && cd "$WORK/empty"
 ac ls

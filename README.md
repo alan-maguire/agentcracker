@@ -87,7 +87,9 @@ agentcracker cache  [--drop [DIR]]   # per-project build caches (the guest's ~/.
 ```
 
 `SESSION` is an id prefix and defaults to the latest session for the
-current directory.  `acr` is short for `agentcracker`.
+current directory.  `acr` is short for `agentcracker`, and
+`agentcracker run <command>` runs a command whose name is also a
+subcommand.
 
 - **Review later.**  A kept session can be diffed, applied, resumed
   (`resume`: boot it again on the same disk) or opened in a shell
