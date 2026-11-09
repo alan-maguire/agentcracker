@@ -412,7 +412,8 @@ with
 without
 .B boot = true
 the guest has no
-.IR /dev/kvm .
+.IR /dev/kvm ,
+and the host hides VMX and SVM from it.
 .B acrboot
 exits 0 when the kernel shut the VM down, 1 on a kernel panic, 124 on a
 timeout and 2 on an error.  The kernel must be the uncompressed ELF

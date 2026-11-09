@@ -1,10 +1,10 @@
 //! `acrboot`: boot a kernel the agent built, in a microVM of its own.
 //!
 //! The session's VM has nested virtualisation: the guest kernel has KVM
-//! built in and the host passes VMX/SVM through, so inside a session
-//! `acrboot VMLINUX` runs Firecracker itself - a second-level microVM with
-//! no network and no vsock, CPUs and memory within the session's, a
-//! timeout - and shows its serial console.  It exits with the outcome: 0
+//! built in and the host passes VMX/SVM through (with `boot = true`), so
+//! inside a session `acrboot VMLINUX` runs Firecracker itself - a
+//! second-level microVM with no network and no vsock, CPUs and memory
+//! within the session's, a timeout - and shows its serial console.  It exits with the outcome: 0
 //! when the kernel shut the VM down, 1 on a panic, 124 on a timeout, 2 on
 //! an error.
 //!
@@ -27,6 +27,9 @@
 //!
 //! It is opt-in (`boot = true`, in the user's config only): acinit makes
 //! `/dev/kvm` usable by the agent only then, and removes it otherwise.
+//! Without it the host also hides VMX/SVM from the session's VM (a
+//! Firecracker CPU template), so a guest kernel the agent took over still
+//! cannot reach the host's nested virtualisation code.
 //! Nothing here runs on the host.  The test VM lives inside the session's
 //! VM - its memory, CPUs and disk are the session's, and it ends with the
 //! session - so a test kernel that escapes its VM lands in the sandbox.
@@ -416,15 +419,20 @@ fn run(args: &[String]) -> Result<i32> {
     })
 }
 
+/// On the session kernel's command line when the session has `boot = true`
+/// (a module-style parameter, so the kernel neither uses it nor passes it
+/// to init).  It only tells [`check_kvm`] which message to give: without
+/// `boot`, the host hides VMX/SVM and acinit removes `/dev/kvm`.
+pub const BOOT_ARG: &str = "agentcracker.boot=1";
+
 /// Error unless this VM can run one: `/dev/kvm` is there only in sessions
 /// with `boot = true`, on a host that exposes nested virtualisation.
 fn check_kvm() -> Result<()> {
     if std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok() && Path::new(FIRECRACKER).exists() {
         return Ok(());
     }
-    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    let nested = cpuinfo.lines().any(|l| l.starts_with("flags") && l.split_whitespace().any(|f| f == "vmx" || f == "svm"));
-    if nested {
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    if !cmdline.split_whitespace().any(|a| a == BOOT_ARG) {
         crate::bail!(
             "booting test kernels is not enabled for this session; it is turned on with `boot = true` in \
              ~/.config/agentcracker/config.toml on the host"
@@ -432,7 +440,7 @@ fn check_kvm() -> Result<()> {
     }
     crate::bail!(
         "this VM has no virtualisation support: the host's KVM must allow nested virtualisation \
-         (kvm_intel or kvm_amd `nested=1`), and `boot = true` must be set in ~/.config/agentcracker/config.toml on the host"
+         (kvm_intel or kvm_amd `nested=1`)"
     )
 }
 

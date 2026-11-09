@@ -1,8 +1,8 @@
 #!/bin/bash
 # acrboot: the agent boots a kernel it built in a microVM of its own,
-# nested in the session's.  Off by default (no /dev/kvm), enabled only by
-# the user's config; outcomes (exit, panic, timeout, error), root disks,
-# limits, the records the user gets, and cleanup.
+# nested in the session's.  Off by default (no /dev/kvm, VMX/SVM hidden),
+# enabled only by the user's config; outcomes (exit, panic, timeout, error),
+# root disks, limits, the records the user gets, and cleanup.
 # agentcracker's own guest kernel stands in for one the agent built.
 . "$(dirname "$0")/lib.sh"
 require_vm
@@ -17,6 +17,8 @@ ac_run sh -c 'acrboot vmlinux; echo rc=$?; test -e /dev/kvm && echo kvm'
 assert_contains "$AC_OUT" "rc=2" "acrboot fails"
 assert_not_contains "$AC_OUT" "kvm" "the guest has no /dev/kvm"
 assert_contains "$AC_ERR$AC_OUT" "boot = true" "and says how to turn it on"
+ac_run sh -c 'grep -cwE "vmx|svm" /proc/cpuinfo'
+assert_eq "$AC_OUT" "0" "nor VMX or SVM: the host hides them"
 ac_run sh -c 'test -e ~/.claude/skills/agentcracker-acrboot && echo skill; grep -c "agentcracker sandbox" ~/.claude/CLAUDE.md; grep -c "acrboot. boots" ~/.claude/CLAUDE.md'
 assert_eq "$AC_OUT" "$(printf '1\n0')" "the agent is told about its sandbox, but not about acrboot"
 

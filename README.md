@@ -365,8 +365,10 @@ ext4 and tmpfs, which `acrboot --kconfig` includes.
   CPUs are the session's.  But it hands the agent ring 0 in a VM whose
   exits the host's KVM handles first, so the host's nested-virtualisation
   code faces a kernel the agent controls - more than a session otherwise
-  exposes.  So it is off by default (and without it the guest has no
-  `/dev/kvm`), and a project's `.agentcracker.toml` cannot turn it on (a
+  exposes.  So it is off by default, and without it the guest has no
+  `/dev/kvm` and the host hides VMX and SVM from it (a Firecracker CPU
+  template), so not even a guest kernel the agent took over can reach
+  that code.  A project's `.agentcracker.toml` cannot turn it on (a
   cloned repository must not grant that to its agents).
 
 ## Kernel and root filesystem: the host's own userspace

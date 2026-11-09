@@ -106,6 +106,26 @@ pub fn hash_file(p: &Path) -> Option<String> {
     std::fs::read(p).ok().map(|d| Fnv::new().bytes(&d).hex())
 }
 
+/// Firecracker custom CPU template that hides hardware virtualisation from
+/// the guest: CPUID leaf 1 ECX bit 5 (VMX, Intel) and leaf 0x80000001 ECX
+/// bit 2 (SVM, AMD) cleared.  Used unless `boot = true`, so that turning
+/// acrboot off is enforced by the host's KVM (which refuses VMXON, or
+/// setting EFER.SVME, to a guest whose CPUID lacks the feature) rather
+/// than by the guest removing `/dev/kvm`: a guest whose kernel the agent
+/// took over cannot reach the host's nested virtualisation code.  Both
+/// leaves exist on Intel and AMD; the other vendor's bit is already 0.
+fn no_nested_virt() -> serde_json::Value {
+    let clear = |bit: usize| format!("0b{}0{}", "x".repeat(31 - bit), "x".repeat(bit));
+    serde_json::json!({
+        "cpuid_modifiers": [
+            {"leaf": "0x1", "subleaf": "0x0", "flags": 0,
+             "modifiers": [{"register": "ecx", "bitmap": clear(5)}]},
+            {"leaf": "0x80000001", "subleaf": "0x0", "flags": 0,
+             "modifiers": [{"register": "ecx", "bitmap": clear(2)}]},
+        ]
+    })
+}
+
 /// Build the home seed stream sent to the guest at boot.
 ///
 /// On a session's first boot (`first_boot`) it holds `~/.claude.json`,
@@ -476,7 +496,12 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
     if !console {
         args.push_str(" quiet loglevel=1");
     }
-    let drive = |id: &str, p: &Path, root: bool, ro: bool| {
+    if cfg.boot {
+        // for acrboot's messages only (see crate::acrboot::BOOT_ARG)
+        args.push(' ');
+        args.push_str(crate::acrboot::BOOT_ARG);
+    }
+    let drive =|id: &str, p: &Path, root: bool, ro: bool| {
         serde_json::json!({"drive_id": id, "path_on_host": p, "is_root_device": root, "is_read_only": ro})
     };
     let mut drives = vec![
@@ -511,13 +536,16 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         drives.push(drive("cache", &c.image, false, false));
         dev
     });
-    let fc_cfg = serde_json::json!({
+    let mut fc_cfg = serde_json::json!({
         "boot-source": {"kernel_image_path": vmlinux, "boot_args": args},
         "drives": drives,
         "machine-config": {"vcpu_count": s.meta.vcpus, "mem_size_mib": s.meta.mem_mib, "smt": false},
         "vsock": {"guest_cid": 3, "uds_path": uds},
         "entropy": {},
     });
+    if !cfg.boot {
+        fc_cfg["cpu-config"] = no_nested_virt();
+    }
     let cfg_path = rundir.join("firecracker.json");
     std::fs::write(&cfg_path, serde_json::to_vec_pretty(&fc_cfg)?)?;
 
