@@ -34,6 +34,7 @@ macro_rules! out {
 }
 
 use crate::changes::{self, ChangeSet};
+use crate::{agentstate, apply, gitimport};
 use crate::config::Config;
 use crate::images::{self, Refresh, status};
 use crate::session::{self, Session};
@@ -439,10 +440,10 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
         }
     }
     crate::util::mark("vm gone");
-    if let Err(e) = changes::extract_state(s) {
+    if let Err(e) = agentstate::extract_state(s) {
         eprintln!("agentcracker: could not save agent state: {e}");
     }
-    if changes::guest_refreshed_credentials(s) {
+    if agentstate::guest_refreshed_credentials(s) {
         let a = crate::agent::for_session(s.meta.agent.as_deref()).display;
         status(&format!(
             "{a} refreshed its login inside the VM; agentcracker never copies credentials back to the host. \
@@ -479,7 +480,7 @@ fn review(s: &mut Session, cfg: &Config) -> Result<()> {
         }
         let ignored = cs.as_ref().map_or(0, |c| c.ignored_count());
         let has_changes = cs.as_ref().is_some_and(|c| !c.is_empty());
-        let head = cs.as_ref().and_then(|c| changes::agent_head(c, s.meta.git_head.as_deref()));
+        let head = cs.as_ref().and_then(|c| gitimport::agent_head(c, s.meta.git_head.as_deref()));
         eprintln!();
         if let Some(cs) = &cs {
             if has_changes {
@@ -539,7 +540,7 @@ fn review(s: &mut Session, cfg: &Config) -> Result<()> {
             }
             'b' => {
                 let cs = cs.unwrap();
-                match changes::import_branch(&cs, s) {
+                match gitimport::import_branch(&cs, s) {
                     Ok((b, desc)) => {
                         status(&format!("created branch {b} ({desc})"));
                         s.meta.branch = Some(b);
@@ -605,7 +606,7 @@ fn apply_interactive(s: &mut Session, cs: &ChangeSet) -> Result<bool> {
             _ => return Ok(false),
         }
     }
-    let r = changes::apply(cs, &s.meta.id, include)?;
+    let r = apply::apply(cs, &s.meta.id, include)?;
     for e in &r.errors {
         eprintln!("agentcracker: apply: {e}");
     }
@@ -872,7 +873,7 @@ fn cmd_show(args: &[String]) -> Result<i32> {
             row("", "denied hosts were requested by the agent; allow one with --allow HOST only if you expect this work to need it".into());
         }
     }
-    let tr = changes::transcripts(&s);
+    let tr = agentstate::transcripts(&s);
     if !tr.is_empty() {
         let p = crate::agent::for_session(m.agent.as_deref());
         row("history", format!("{} {} transcript(s) (resume inside with: agentcracker resume {} {})", tr.len(), p.display, m.id, p.resume));
@@ -988,12 +989,12 @@ fn cmd_apply(args: &[String]) -> Result<i32> {
 }
 
 /// `agentcracker branch [SESSION]`: import the agent's commits as the
-/// branch `agentcracker/<id>` (see [`changes::import_branch`]) and record it
+/// branch `agentcracker/<id>` (see [`gitimport::import_branch`]) and record it
 /// in the session.  `arg`: optional session id prefix.  Returns 0.
 fn cmd_branch(arg: Option<&str>) -> Result<i32> {
     let mut s = session::find(arg, &cwd()?)?;
     let cs = load_cs(&s)?;
-    let (b, desc) = changes::import_branch(&cs, &s)?;
+    let (b, desc) = gitimport::import_branch(&cs, &s)?;
     status(&format!("created branch {b} ({desc})"));
     s.meta.branch = Some(b);
     s.save()?;
@@ -1169,7 +1170,7 @@ fn session_json(s: &Session) -> serde_json::Value {
             f
         })
         .collect();
-    let agent_head = cs.as_ref().and_then(|cs| changes::agent_head(cs, m.git_head.as_deref()));
+    let agent_head = cs.as_ref().and_then(|cs| gitimport::agent_head(cs, m.git_head.as_deref()));
     let (own, shared) = s.disk_usage();
     let o = v.as_object_mut().unwrap();
     o.insert("boots".into(), m.boots.into());
@@ -1198,7 +1199,7 @@ fn session_json(s: &Session) -> serde_json::Value {
     );
     o.insert(
         "transcripts".into(),
-        changes::transcripts(s)
+        agentstate::transcripts(s)
             .into_iter()
             .map(|t| serde_json::json!({ "id": t.id, "messages": t.messages, "last": t.last, "first_prompt": t.first_prompt }))
             .collect::<Vec<_>>()

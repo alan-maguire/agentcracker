@@ -81,7 +81,7 @@ fn first_boot_seed(cwd: &Path, cfg: &Config, p: &Profile) -> Vec<String> {
 
 /// Paths below `$HOME` exported from the guest to the session store on exit:
 /// the agent profile's state (its transcripts), its credentials file (only
-/// to notice a refresh; see [`crate::changes::guest_refreshed_credentials`]),
+/// to notice a refresh; see [`crate::agentstate::guest_refreshed_credentials`]),
 /// the configured `state` entries, and the test kernel boots
 /// ([`crate::acrboot::RECORDS`]).
 ///

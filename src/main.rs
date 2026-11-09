@@ -19,17 +19,23 @@
 //! - `proxy`: the host-side HTTPS CONNECT proxy enforcing the allowlist
 //! - `proto`: the vsock frame protocol and the file stream format
 //! - `guest`: acinit, PID 1 inside the VM
-//! - `changes`: interpreting, reviewing and safely applying the guest's changes
+//! - `changes`: interpreting and reviewing the guest's changes
+//! - `apply`: applying them to the host, through confined writes
+//! - `gitimport`: importing the agent's commits as a host branch
+//! - `agentstate`: the agent's exported state and transcripts
 //! - `util`: errors, paths, hashing, locking and formatting helpers
 
 mod acrboot;
 mod activity;
 mod agent;
+mod agentstate;
+mod apply;
 mod buildcache;
 mod changes;
 mod cli;
 mod config;
 mod erofs;
+mod gitimport;
 mod guidance;
 mod guest;
 mod images;

@@ -255,14 +255,14 @@ it), removes the runtime directory and returns an `Outcome`.
 `crashed` if no exit status arrived), then:
 
 - `ChangeSet::load` + `summary` record change counts in `meta.json`;
-- `changes::extract_state` unpacks `state.stream` into `state/`;
-- `changes::guest_refreshed_credentials` reports whether the guest
+- `agentstate::extract_state` unpacks `state.stream` into `state/`;
+- `agentstate::guest_refreshed_credentials` reports whether the guest
   refreshed its Claude login, and deletes the exported copy.  Guest
   credentials are never written to the host: the host cannot tell a
   refreshed token for the user's account from one for an account a
   compromised guest planted.
 
-### 3.8 Review, apply and branch (`cli::review`, `changes.rs`)
+### 3.8 Review, apply and branch (`cli::review`, `changes.rs`, `apply.rs`, `gitimport.rs`)
 
 `ChangeSet::from_stream` classifies each streamed entry against the
 manifest and against the host as it is now:
@@ -282,7 +282,7 @@ The review menu offers diff (`render_diff` runs `diff -u` per file and
 pages the output), apply, branch, shell (boot again with the user's
 shell), keep and discard.
 
-**Apply** (`changes::apply`) deletes first, then creates in stream
+**Apply** (`apply::apply`) deletes first, then creates in stream
 order.  Every write goes through `Confined`: the parent directory is
 opened with `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
 RESOLVE_NO_MAGICLINKS)`, data goes to a temporary file
@@ -290,7 +290,7 @@ RESOLVE_NO_MAGICLINKS)`, data goes to a temporary file
 `mode & 0777` is kept.  Conflicts are skipped unless the user chooses to
 overwrite them.
 
-**Branch** (`changes::import_branch`) copies only the agent's object
+**Branch** (`gitimport::import_branch`) copies only the agent's object
 files (loose objects and packs, names validated) out of the stream into
 a bare scratch repository, which borrows the host's objects via
 `alternates`.  The host repository then fetches the agent's HEAD from it
@@ -461,7 +461,10 @@ All source is in `src/`.
 | `guidance.rs` | What the agent is told: the sandbox section of its instructions file, the acrboot skill. |
 | `acrboot.rs` | `acrboot`: the guest command that boots test kernels in nested microVMs. |
 | `buildcache.rs` | Per-project build caches (the guest's `~/.cache`): attach with a lock, list, drop. |
-| `changes.rs` | Change classification, diff, confined apply, branch import, agent state. |
+| `changes.rs` | The change set: classification against the manifest and the host, the list and diff. |
+| `apply.rs` | Applying changes to the host through confined writes (`openat2`). |
+| `gitimport.rs` | Importing the agent's commits as a host branch. |
+| `agentstate.rs` | The agent's exported state: unpacking it, refreshed logins, transcript summaries. |
 | `util.rs` | Errors, hashing, paths, locks, glob/excludes, formatting, prompts. |
 
 ### `main.rs`
@@ -476,7 +479,7 @@ ones.  `detect` picks one from the command (looking past `env`, `npx`,
 and `Profile::path` resolves a path in the agent's directory, honouring
 `CODEX_HOME`.  `vm::first_boot_seed`, `vm::state_paths`,
 `vm::credential_path` and `vm::guest_env` take the profile;
-`changes::transcripts` reads Claude's or Codex's transcripts, and
+`agentstate::transcripts` reads Claude's or Codex's transcripts, and
 `activity::tool_events` both formats.
 
 ### `guidance.rs`
@@ -626,11 +629,18 @@ output capped), and parses that the same way.
   classification.
 - `summary`, `shown`, `conflicts`, `summary_line`, `short_summary`,
   `print_list`, `render_diff`, `show_diff`, `colorize`: presentation.
+
+### `apply.rs`
 - `Confined` (`write_file`, `write_bytes`, `symlink`, `mkdir`,
-  `delete`), `openat2_beneath`, `apply`, `Applied`: confined writes.
-- `agent_head`, `import_branch`, `git_file`, `git`: branch import.
-- `extract_state`, `guest_refreshed_credentials`, `transcripts`, `Transcript`:
-  agent state.
+  `delete`), `openat2_beneath`: confined writes.
+- `apply`, `Applied`: applying a change set.
+
+### `gitimport.rs`
+- `agent_head`, `import_branch`, `git_file`, `read_stream_file`, `is_sha`.
+
+### `agentstate.rs`
+- `extract_state`, `guest_refreshed_credentials`: the exported state.
+- `transcripts`, `Transcript`, `codex_transcripts`: summaries for `show`.
 
 ### `util.rs`
 - `Error`, `Result`, `bail!`, `Context`, `last_os_error`: errors.
