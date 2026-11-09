@@ -44,11 +44,13 @@ cargo doc --document-private-items --open
                  [vdf lower-delta.img (ro)]  [next: the project's cache.img (rw)]
 ```
 
-- **One binary, two roles.**  `agentcracker` is a single Rust crate.
+- **One binary, four roles.**  `agentcracker` is a single Rust crate.
   `make` builds it twice: dynamically linked for the host, and statically
   linked (`+crt-static`) as `acinit`, which is copied into the base image.
-  `main()` checks `getpid() == 1`: as PID 1 it runs `guest::main`,
-  otherwise `cli::run`.  So host and guest always agree on the protocol
+  `main()` picks the role: as PID 1, `acrboot::init` if the kernel command
+  line has `acrboot_run` (an `acrboot --run` test VM), else `guest::main`
+  (the session's init); run as `acrboot`, `acrboot::main`; otherwise the
+  host CLI, `cli::run`.  So host and guest always agree on the protocol
   and stream formats, which live in shared code (`src/proto.rs`).
 - **Firecracker** runs as the invoking user, without the jailer, with a
   seccomp filter compiled at build time.  It is started with `--no-api`
@@ -446,7 +448,7 @@ All source is in `src/`.
 
 | File | Role |
 |---|---|
-| `main.rs` | Entry point; picks the host or guest role. |
+| `main.rs` | Entry point; picks the role (host CLI, acinit, `acrboot`, test VM init). |
 | `cli.rs` | Subcommands, the run → boot → review loop, session queries. |
 | `config.rs` | Config files, defaults, the allowlist matcher. |
 | `session.rs` | The session store: `meta.json`, manifest, locking, lookup. |

@@ -601,3 +601,14 @@ pub fn safe_path(p: &std::path::Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     safe_text(p.as_os_str().as_bytes(), false)
 }
+
+/// Run `git -C <dir> <args...>` on the host.  Returns its standard output,
+/// trimmed; errors with git's own message if it fails, or if git cannot be
+/// run.  (Callers that only need to know whether it worked use `.ok()`.)
+pub fn git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
+    let o = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().ctx("running git")?;
+    if !o.status.success() {
+        crate::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+}

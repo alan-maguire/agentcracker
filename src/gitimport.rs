@@ -6,12 +6,11 @@
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::process::Command;
 
 use crate::apply::Confined;
 use crate::changes::{ChangeSet, Op};
 use crate::session::Session;
-use crate::util::{Context, Result, safe_rel_path};
+use crate::util::{Result, git, safe_rel_path};
 
 
 /// Read the data of file operation `op` from the change stream into memory.
@@ -86,16 +85,6 @@ pub fn agent_head(cs: &ChangeSet, base: Option<&str>) -> Option<(String, String)
     Some((sha, name))
 }
 
-/// Run `git -C <dir> <args...>`.  Returns its stdout, trimmed; errors with
-/// git's stderr if it fails, or if git cannot be run.
-fn git(args: &[&str], dir: &Path) -> Result<String> {
-    let o = Command::new("git").arg("-C").arg(dir).args(args).output().ctx("running git")?;
-    if !o.status.success() {
-        crate::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim());
-    }
-    Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
-}
-
 /// Import the agent's new git objects into the host repository via a
 /// scratch repository and `git fetch` (with fsck), creating or updating a
 /// branch.
@@ -122,7 +111,7 @@ pub fn import_branch(cs: &ChangeSet, s: &Session) -> Result<(String, String)> {
     let tmp = s.path("tmp/import.git");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
-    git(&["init", "-q", "--bare", "."], &tmp)?;
+    git(&tmp, &["init", "-q", "--bare", "."])?;
     let mut w = Confined::new(&tmp, &s.meta.id)?;
     let src = File::open(&cs.stream)?;
     let hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
@@ -143,7 +132,7 @@ pub fn import_branch(cs: &ChangeSet, s: &Session) -> Result<(String, String)> {
     }
     let objects = cs.cwd.join(".git/objects");
     std::fs::write(tmp.join("objects/info/alternates"), format!("{}\n", objects.display()))?;
-    git(&["update-ref", "refs/heads/agent", &sha], &tmp)?;
+    git(&tmp, &["update-ref", "refs/heads/agent", &sha])?;
     // a --branch name only moves forward; agentcracker/<id> is ours to reset
     let (branch, force) = match &s.meta.work_branch {
         Some(b) => (b.clone(), ""),
@@ -152,11 +141,11 @@ pub fn import_branch(cs: &ChangeSet, s: &Session) -> Result<(String, String)> {
     if force.is_empty() {
         // say why git would refuse (it says nothing with -q)
         let r = format!("refs/heads/{branch}");
-        if git(&["symbolic-ref", "-q", "HEAD"], &cs.cwd).is_ok_and(|h| h == r) {
+        if git(&cs.cwd, &["symbolic-ref", "-q", "HEAD"]).is_ok_and(|h| h == r) {
             crate::bail!("{branch} is checked out here: switch to another branch to import into it");
         }
-        if let Ok(tip) = git(&["rev-parse", "--verify", "-q", &r], &cs.cwd) {
-            if git(&["merge-base", "--is-ancestor", &tip, &sha], &tmp).is_err() {
+        if let Ok(tip) = git(&cs.cwd, &["rev-parse", "--verify", "-q", &r]) {
+            if git(&tmp, &["merge-base", "--is-ancestor", &tip, &sha]).is_err() {
                 crate::bail!(
                     "{branch} has commits the agent's does not build on (it rewrote history, or {branch} moved here): \
                      not imported; rename or delete {branch} here and import again"
@@ -165,10 +154,10 @@ pub fn import_branch(cs: &ChangeSet, s: &Session) -> Result<(String, String)> {
         }
     }
     let tmp_s = tmp.display().to_string();
-    git(&["-c", "fetch.fsckObjects=true", "fetch", "-q", "--no-tags", "--no-write-fetch-head", &tmp_s, &format!("{force}refs/heads/agent:refs/heads/{branch}")], &cs.cwd)?;
+    git(&cs.cwd, &["-c", "fetch.fsckObjects=true", "fetch", "-q", "--no-tags", "--no-write-fetch-head", &tmp_s, &format!("{force}refs/heads/agent:refs/heads/{branch}")])?;
     let _ = std::fs::remove_dir_all(&tmp);
     let count = match &s.meta.git_head {
-        Some(base) => git(&["rev-list", "--count", &format!("{base}..{sha}")], &cs.cwd).unwrap_or_default(),
+        Some(base) => git(&cs.cwd, &["rev-list", "--count", &format!("{base}..{sha}")]).unwrap_or_default(),
         None => String::new(),
     };
     let from = crate::util::safe_text(from.as_bytes(), false);

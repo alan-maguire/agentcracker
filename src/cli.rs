@@ -258,8 +258,7 @@ fn git_head(cwd: &Path) -> Option<String> {
     if !cwd.join(".git").exists() {
         return None;
     }
-    let o = std::process::Command::new("git").arg("-C").arg(cwd).args(["rev-parse", "HEAD"]).output().ok()?;
-    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    crate::util::git(cwd, &["rev-parse", "HEAD"]).ok()
 }
 
 /// Check `name` for `--branch`: `cwd` must be a git repository (not a
@@ -270,12 +269,11 @@ fn check_new_branch(cwd: &Path, has_head: bool, name: &str) -> Result<String> {
     if !cwd.join(".git").is_dir() || !has_head {
         crate::bail!("--branch needs a git repository with commits (and not a worktree)");
     }
-    let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(cwd).args(args).output();
-    let ok = !name.starts_with('-') && git(&["check-ref-format", &format!("refs/heads/{name}")]).is_ok_and(|o| o.status.success());
-    if !ok {
+    let git = |args: &[&str]| crate::util::git(cwd, args).is_ok();
+    if name.starts_with('-') || !git(&["check-ref-format", &format!("refs/heads/{name}")]) {
         crate::bail!("--branch {name}: not a valid branch name");
     }
-    if git(&["rev-parse", "--verify", "-q", &format!("refs/heads/{name}")]).is_ok_and(|o| o.status.success()) {
+    if git(&["rev-parse", "--verify", "-q", &format!("refs/heads/{name}")]) {
         crate::bail!("--branch {name}: the branch already exists (the agent's commits go on a new branch)");
     }
     Ok(name.to_string())

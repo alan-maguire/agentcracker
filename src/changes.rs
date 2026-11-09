@@ -204,10 +204,7 @@ pub fn symlink_escapes(path: &[u8], target: &[u8]) -> bool {
 /// relative to `cwd`.  Agent changes there are hooks git will run on the
 /// host.  Returns `None` when unset, outside the project or not a repo.
 fn hooks_path_in(cwd: &Path) -> Option<Vec<u8>> {
-    let git = |args: &[&str]| -> Option<String> {
-        let o = std::process::Command::new("git").arg("-C").arg(cwd).args(args).stderr(std::process::Stdio::null()).output().ok()?;
-        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())
-    };
+    let git = |args: &[&str]| crate::util::git(cwd, args).ok().filter(|s| !s.is_empty());
     let hp = git(&["config", "--get", "core.hooksPath"])?;
     let hp = crate::config::expand(&hp);
     let abs = if hp.is_absolute() { hp } else { PathBuf::from(git(&["rev-parse", "--show-toplevel"])?).join(hp) };

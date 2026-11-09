@@ -70,10 +70,8 @@ pub fn agent_files(p: &Profile, home: &Path, c: &Context) -> Vec<AgentFile> {
 /// which sessions created before this got a copy of, is removed.
 pub fn git_identity() -> Vec<AgentFile> {
     let get = |k: &str| {
-        let o = std::process::Command::new("git").args(["config", "--global", "--get", k]).output().ok()?;
-        let v = String::from_utf8(o.stdout).ok()?;
-        let v = v.trim();
-        (o.status.success() && !v.is_empty() && !v.contains(['\n', '\r', '\0'])).then(|| v.to_string())
+        let v = crate::util::git(&crate::util::home(), &["config", "--global", "--get", k]).ok()?;
+        (!v.is_empty() && !v.contains(['\n', '\r', '\0'])).then_some(v)
     };
     // quoted, with git's escapes for `"` and `\`
     let quote = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));

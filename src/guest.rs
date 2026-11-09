@@ -1054,11 +1054,7 @@ fn start_branch(project: &Path, name: &str, commit: &str, uid: u32, gid: u32) ->
         crate::bail!("invalid commit");
     }
     let git = project.join(".git");
-    unsafe {
-        libc::setfsgid(gid);
-        libc::setfsuid(uid);
-    }
-    let r = (|| -> Result<()> {
+    as_user(uid, gid, || {
         let r = git.join("refs/heads").join(rel);
         if let Some(d) = r.parent() {
             std::fs::create_dir_all(d)?;
@@ -1066,7 +1062,20 @@ fn start_branch(project: &Path, name: &str, commit: &str, uid: u32, gid: u32) ->
         std::fs::write(&r, format!("{commit}\n"))?;
         std::fs::write(git.join("HEAD"), format!("ref: refs/heads/{name}\n"))?;
         Ok(())
-    })();
+    })
+}
+
+/// Run `f` with the user's filesystem credentials (`setfsuid`/`setfsgid`),
+/// then switch back to root's.  For files acinit writes where the agent
+/// could have left a symlink: the kernel checks them as the user's, so a
+/// link cannot point the write at root's files, and what is created is the
+/// user's.  Returns `f`'s result.
+fn as_user<T>(uid: u32, gid: u32, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    unsafe {
+        libc::setfsgid(gid);
+        libc::setfsuid(uid);
+    }
+    let r = f();
     unsafe {
         libc::setfsuid(0);
         libc::setfsgid(0);
@@ -1079,11 +1088,7 @@ fn start_branch(project: &Path, name: &str, commit: &str, uid: u32, gid: u32) ->
 /// agent left in its home cannot point these writes at root's files, and
 /// what is created belongs to the user.
 fn write_agent_files(home: &Path, files: &[crate::proto::AgentFile], uid: u32, gid: u32) -> Result<()> {
-    unsafe {
-        libc::setfsgid(gid);
-        libc::setfsuid(uid);
-    }
-    let r = (|| -> Result<()> {
+    as_user(uid, gid, || {
         for f in files {
             let Some(rel) = crate::util::safe_rel_path(f.path.as_bytes()) else { continue };
             let p = home.join(rel);
@@ -1105,12 +1110,7 @@ fn write_agent_files(home: &Path, files: &[crate::proto::AgentFile], uid: u32, g
             }
         }
         Ok(())
-    })();
-    unsafe {
-        libc::setfsuid(0);
-        libc::setfsgid(0);
-    }
-    r
+    })
 }
 
 /// Mount the build cache disk `dev` and bind its `home` directory (created

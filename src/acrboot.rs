@@ -142,8 +142,8 @@ extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::Relaxed);
 }
 
-/// `acrboot ...` in the guest.  Returns the exit status.
-pub fn client(args: &[String]) -> i32 {
+/// `acrboot ...` in the session's VM.  Returns the exit status.
+pub fn main(args: &[String]) -> i32 {
     match run(args) {
         Ok(code) => code,
         Err(e) => {
