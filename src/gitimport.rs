@@ -216,3 +216,61 @@ pub fn import_branch(cs: &ChangeSet, s: &Session) -> Result<(String, String)> {
     let desc = if count.is_empty() { format!("from {from}") } else { format!("{count} commit(s) on {from}") };
     Ok((branch, desc))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::StreamWriter;
+    use crate::util::TestDir;
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// The change set of a guest whose `.git/` holds `files` (path, content),
+    /// for a project whose host `.git/` is empty.
+    fn guest_git(t: &TestDir, files: &[(&str, &str)]) -> ChangeSet {
+        let proj = t.0.join("proj");
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        let mut w = StreamWriter::new(Vec::new());
+        for (p, c) in files {
+            w.file(format!(".git/{p}").as_bytes(), 0o644, c.len() as u64, &mut c.as_bytes()).unwrap();
+        }
+        w.end().unwrap();
+        let stream = t.0.join("changes.stream");
+        std::fs::write(&stream, &w.w).unwrap();
+        ChangeSet::from_stream(&stream, &[], &proj).unwrap()
+    }
+
+    #[test]
+    fn head_resolves_only_to_a_commit_id_inside_git() {
+        let t = TestDir::new("gitimport-head");
+        let cases: &[(&[(&str, &str)], Option<(&str, &str)>)] = &[
+            (&[("HEAD", &format!("{SHA}\n"))], Some((SHA, "HEAD"))),
+            (&[("HEAD", "ref: refs/heads/main\n"), ("refs/heads/main", SHA)], Some((SHA, "main"))),
+            (&[("HEAD", "ref: refs/heads/main\n"), ("packed-refs", &format!("# pack-refs\n{SHA} refs/heads/main\n"))], Some((SHA, "main"))),
+            // out of .git/, by .. or absolutely, or outside refs/
+            (&[("HEAD", "ref: refs/../../../etc/passwd\n")], None),
+            (&[("HEAD", "ref: /etc/passwd\n")], None),
+            (&[("HEAD", "ref: config\n"), ("config", SHA)], None),
+            (&[("HEAD", "ref: refs//heads/main\n"), ("refs/heads/main", SHA)], None),
+            // not a full object id
+            (&[("HEAD", "deadbeef\n")], None),
+            (&[("HEAD", "--upload-pack=touch /tmp/x\n")], None),
+            (&[("HEAD", "ref: refs/heads/main\n"), ("refs/heads/main", "ref: refs/heads/main\n")], None),
+            (&[("HEAD", "ref: refs/heads/main\n"), ("refs/heads/main", &format!("{SHA}x"))], None),
+            (&[("HEAD", "ref: refs/heads/main\n")], None),
+        ];
+        for (files, want) in cases {
+            let cs = guest_git(&t, files);
+            let got = agent_head(&cs, None);
+            assert_eq!(got.as_ref().map(|(s, n)| (s.as_str(), n.as_str())), *want, "{files:?}");
+        }
+    }
+
+    #[test]
+    fn an_unfinished_bisect_is_not_a_commit() {
+        let t = TestDir::new("gitimport-bisect");
+        let cs = guest_git(&t, &[("HEAD", &format!("{SHA}\n")), ("BISECT_START", "main\n")]);
+        assert!(agent_head(&cs, None).is_none());
+        assert!(checked_out_back(&cs, None).is_some_and(|w| w.contains("git bisect unfinished")));
+    }
+}

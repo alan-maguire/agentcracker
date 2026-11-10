@@ -141,6 +141,37 @@ assert_contains "$AC_OUT" "$(printf 'Test "Q" User\ntest@example.com')" "name an
 assert_not_contains "$AC_OUT" "SECRET" "no other setting is"
 assert_contains "$AC_OUT" 'Test "Q" User <test@example.com>' "and the agent's commits are the user's"
 
+step "a hostile .git: only objects are imported, and git checks them"
+marker=$WORK/pwned
+hooks_before=$(ls .git/hooks | sort | md5sum)
+ac_run sh -c "
+git -c user.name=a -c user.email=a@a commit -q --allow-empty -m 'with hostile config'
+git config core.fsmonitor 'touch $marker.fsmonitor'
+git config core.hooksPath /tmp
+for h in post-checkout post-merge reference-transaction pre-auto-gc; do
+  printf '#!/bin/sh\\ntouch $marker.%s\\n' \$h > .git/hooks/\$h; chmod +x .git/hooks/\$h
+done
+echo / > .git/objects/info/alternates
+echo 'ref: refs/heads/main' > .git/refs/heads/evil
+"
+ac branch "$SID"
+assert_rc 0 "the commit is imported"
+assert_eq "$(git log -1 --format=%s "agentcracker/$SID")" "with hostile config" "as the agent made it"
+git status >/dev/null 2>&1; git log -1 "agentcracker/$SID" >/dev/null 2>&1
+assert_eq "$(ls "$WORK" | grep -c pwned)" "0" "no hook or fsmonitor of the guest's ran on the host"
+assert_eq "$(git config --get core.fsmonitor; git config --get core.hooksPath)" "" "its git config is not taken"
+assert_eq "$(ls .git/hooks | sort | md5sum)" "$hooks_before" "nor its hooks"
+assert_eq "$(cat .git/objects/info/alternates 2>/dev/null)" "" "nor its alternates"
+assert_eq "$(git for-each-ref --format=%\(refname\) refs/heads/evil)" "" "nor its refs"
+ac_run sh -c '
+bad=$(printf "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor nobody\n\nbad\n" | git hash-object -t commit --literally -w --stdin)
+git update-ref refs/heads/main $bad'
+ac branch "$SID"
+assert_rc 1 "a malformed commit is refused"
+assert_contains "$AC_ERR" "fsck" "by git's fsck"
+assert_eq "$(git for-each-ref --format=%\(refname\) "refs/heads/agentcracker/$SID")" "" "and no branch is made"
+git fsck --no-dangling >/dev/null 2>&1 && pass "the repository still passes fsck" || fail "fsck reports problems"
+
 step "not a git repository"
 new_project plain
 ac_run sh -c 'echo x > y.txt'
