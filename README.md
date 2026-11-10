@@ -474,6 +474,162 @@ the commits and take them as a branch.
 Without `--branch`, the commits are imported as `agentcracker/<id>`
 (overwritten by a later import), wherever the agent made them.
 
+## Case studies
+
+Two kernel jobs from start to finish, with every command.  Each shows the
+commands typed in a session shell (`agentcracker bash`), so you can run
+them yourself.  To hand the job to an agent instead, start one
+(`agentcracker claude`) and ask for the result.  The agent gets the
+`agentcracker-acrboot` skill, which covers the same steps.
+
+Both assume an x86_64 host with nested virtualisation
+(`cat /sys/module/kvm_intel/parameters/nested` says `Y` or `1`;
+`kvm_amd` on AMD), `ccache` installed, and this in
+`~/.config/agentcracker/config.toml`:
+
+```toml
+boot   = true     # acrboot
+vcpus  = 8
+memory = "12G"    # a kernel build, then a test VM of 8G out of it
+```
+
+### 1. Build a kernel and run the BPF selftests
+
+In a bpf-next (or any kernel) tree on the host, with no in-tree build
+in it (`make mrproper` if there is one: the out-of-tree build below
+refuses a tree that has one):
+
+```
+cd ~/src/bpf-next
+agentcracker bash
+```
+
+Then, in the session:
+
+```
+O=~/.cache/kbuild B=tools/testing/selftests/bpf
+mkdir -p $O
+
+# configure: the selftests' fragments, plus what Firecracker needs
+cat $B/config $B/config.vm $B/config.x86_64 > $O/.config
+acrboot --kconfig > /tmp/acrboot.config
+scripts/kconfig/merge_config.sh -m -O $O $O/.config /tmp/acrboot.config
+make O=$O CC="ccache gcc" olddefconfig
+
+# build the kernel, then the selftests against it
+make O=$O CC="ccache gcc" -j$(nproc)
+make -C $B KBUILD_OUTPUT=$O -j$(nproc)
+
+# the whole suite, in parallel, on the new kernel
+acrboot --cpus 8 --mem 8G --timeout 3600 --dir $B --run './test_progs -j' $O/vmlinux
+echo "exit: $?"
+
+# one test, with its output
+acrboot --cpus 8 --mem 8G --dir $B --run './test_progs -v -t verifier_ldsx' $O/vmlinux
+```
+
+`acrboot` exits with `test_progs`' status.  `--dir $B` gives the
+selftests to the test VM as a read-write copy, which is discarded after.
+The test VM boots on the session's userspace, so `test_progs` runs
+against the libraries it was built with.  The first build takes about
+11 minutes on 8 vCPUs, and the selftests 3 more.  `~/.cache` is kept
+for the next session of this project, so the kernel build there is
+incremental.  The selftests are rebuilt each session.
+
+To have an agent do it, start `agentcracker --branch fix/foo claude` and
+ask, for example: "build bpf-next out of tree in ~/.cache/kbuild with
+ccache, configured for the BPF selftests and acrboot; run `test_progs
+-t foo` under acrboot and show me the failure; fix it, rerun it and then
+the whole suite, and commit the fix with a Signed-off-by".  Then take
+`fix/foo` from the review menu (`[b]ranch`).  `agentcracker log` shows
+each boot with its outcome, and the agent's account of the results is
+in its transcript (`agentcracker show`).
+
+### 2. Bisect a regression
+
+Say `test_progs -t foo` passes on `v6.17` and fails on `v6.18`.  The test
+must exist and pass at the good commit.  If it doesn't, use a
+self-contained reproducer instead (a script, or a small program built in
+the step).  Write the step script in the project directory, so that it
+comes back in the review and you can rerun it.  Git leaves an untracked
+file alone as bisect checks out commits.  The script rebuilds the
+configuration at every step from that commit's own fragments, because
+the options change across the range.  As in case 1, the tree must have
+no in-tree build in it.
+
+```
+cd ~/src/linux
+agentcracker bash
+```
+
+```
+cat > bisect-step.sh <<'EOF'
+#!/bin/sh
+# one `git bisect run` step: build this commit, run the test in acrboot
+O=$HOME/.cache/kbuild B=tools/testing/selftests/bpf
+cat $B/config $B/config.vm $B/config.x86_64 > $O/.config
+acrboot --kconfig > /tmp/acrboot.config
+scripts/kconfig/merge_config.sh -m -O $O $O/.config /tmp/acrboot.config >/dev/null
+make O=$O CC="ccache gcc" olddefconfig >/dev/null
+# a commit that does not build says nothing about the bug: skip it
+make O=$O CC="ccache gcc" -j$(nproc) >/dev/null 2>&1 || exit 125
+make -C $B KBUILD_OUTPUT=$O -j$(nproc) >/dev/null 2>&1 || exit 125
+acrboot --bisect --cpus 8 --mem 8G --timeout 900 --dir $B --run './test_progs -t foo' $O/vmlinux
+EOF
+chmod +x bisect-step.sh
+mkdir -p ~/.cache/kbuild
+
+git bisect start v6.18 v6.17
+git bisect run ./bisect-step.sh
+git bisect log > bisect.log
+git bisect reset
+```
+
+`--bisect` makes `acrboot` exit with what `git bisect run` expects:
+- 0 when the test passes: good;
+- 1 when the test fails, or the kernel panics, hangs past `--timeout`,
+  or kills the test: bad;
+- 125 passed on from the script: skip;
+- 128 if `acrboot` itself could not run: stops the bisect rather than
+  blaming a commit.
+
+To bisect a kernel that panics or hangs at boot, use no `--run`:
+`acrboot --bisect --timeout 120 $O/vmlinux` is good when the kernel
+shuts the VM down.  Give it an `--append` that makes a healthy kernel do
+so, such as `kunit_shutdown=reboot` with a KUnit suite.
+
+A release cycle is about 15,000 commits, so 14 steps.  Each step is an
+incremental rebuild, mostly from ccache once the range has been crossed
+a few times, plus a selftests build and a boot.  Expect a few minutes
+per step, not the 11 of a cold build.  Each boot is a `boot` line in
+`agentcracker log`.
+
+On exit, the review lists `bisect-step.sh` and `bisect.log` as added
+files.  `[d]iff` shows the log, and its last lines name the first bad
+commit.  If the session ended before `git bisect reset`, the review
+says the work tree is that commit's rather than the agent's work, offers
+no branch, and `apply` asks first.  `agentcracker resume` the session
+and reset it.  To check the result, run the step on the first bad commit
+and its parent in a fresh session, after `agentcracker cache --drop` so
+no build is reused:
+
+```
+agentcracker sh -c 'git checkout -q <first-bad>^ && ./bisect-step.sh; echo $?; git checkout -q <first-bad> && ./bisect-step.sh; echo $?'
+```
+
+This needs `bisect-step.sh` applied to the project first.  It should
+print 0 and then 1.  Bisecting far back is limited by the host: the
+commits must build with your host's compiler, and older kernels may not
+boot under Firecracker.  `--run` needs EROFS in the test kernel (5.4
+and later), which `acrboot --kconfig` turns on.
+
+To have an agent do it, ask: "bisect why `test_progs -t foo` fails on
+v6.18 but passes on v6.17: use `git bisect run` with a step script in the
+project directory that rebuilds the config from the selftests' fragments
+and `acrboot --kconfig`, exits 125 when the build fails and runs the
+test with `acrboot --bisect`; save `git bisect log` to bisect.log and
+`git bisect reset` at the end".
+
 ## Limitations
 
 - **Linux with KVM only**: x86_64, and aarch64 untested.  Firecracker
