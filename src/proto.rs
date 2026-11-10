@@ -577,3 +577,100 @@ pub fn stream_tree<W: Write>(sw: &mut StreamWriter<W>, src: &std::path::Path, pr
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stream from raw parts: each record is a tag and its fields.
+    fn raw(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+    fn s(b: &[u8]) -> Vec<u8> {
+        [&(b.len() as u32).to_be_bytes()[..], b].concat()
+    }
+    fn all(stream: &[u8]) -> io::Result<Vec<Entry>> {
+        let mut r = StreamReader::new(stream);
+        let mut v = vec![];
+        while let Some(e) = r.next()? {
+            v.push(e);
+        }
+        Ok(v)
+    }
+    fn invalid(stream: &[u8]) -> String {
+        let e = all(stream).expect_err("a bad stream is refused");
+        format!("{:?} {e}", e.kind())
+    }
+
+    #[test]
+    fn a_stream_round_trips() {
+        let mut w = StreamWriter::new(Vec::new());
+        w.dir(b"d", 0o40755).unwrap();
+        w.file(b"d/f", 0o104755, 3, &mut &b"abc"[..]).unwrap();
+        w.symlink(b"d/l", b"../../anywhere").unwrap();
+        w.delete(b"gone").unwrap();
+        w.opaque(b"o", 0o700).unwrap();
+        w.end().unwrap();
+        let mut r = StreamReader::new(&w.w[..]);
+        assert_eq!(r.next().unwrap(), Some(Entry::Dir { path: b"d".to_vec(), mode: 0o755 }), "type bits are dropped");
+        assert_eq!(r.next().unwrap(), Some(Entry::File { path: b"d/f".to_vec(), mode: 0o4755, size: 3 }));
+        let mut data = vec![];
+        r.data_to(&mut data).unwrap();
+        assert_eq!(data, b"abc");
+        assert_eq!(r.next().unwrap(), Some(Entry::Symlink { path: b"d/l".to_vec(), target: b"../../anywhere".to_vec() }));
+        assert_eq!(r.next().unwrap(), Some(Entry::Delete { path: b"gone".to_vec() }));
+        assert_eq!(r.next().unwrap(), Some(Entry::Opaque { path: b"o".to_vec(), mode: 0o700 }));
+        assert_eq!(r.next().unwrap(), None);
+    }
+
+    #[test]
+    fn unsafe_paths_are_refused_in_every_record() {
+        for p in [&b"../x"[..], b"/etc/passwd", b"a/../../b", b"a//b", b"", b"a\0b", b"./a"] {
+            let m = 0o644u32.to_be_bytes();
+            for rec in [
+                raw(&[b"D", &s(p), &m, b"E"]),
+                raw(&[b"O", &s(p), &m, b"E"]),
+                raw(&[b"X", &s(p), b"E"]),
+                raw(&[b"L", &s(p), &s(b"t"), b"E"]),
+                raw(&[b"F", &s(p), &m, &0u64.to_be_bytes(), b"E"]),
+            ] {
+                assert!(invalid(&rec).contains("unsafe path"), "{:?} in {:?}", String::from_utf8_lossy(p), rec[0] as char);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_streams_are_errors_not_panics() {
+        let m = 0o644u32.to_be_bytes();
+        // no end marker, or cut off anywhere
+        let good = raw(&[b"F", &s(b"f"), &m, &3u64.to_be_bytes(), b"abc", b"E"]);
+        assert_eq!(all(&good).unwrap().len(), 1);
+        for n in 0..good.len() {
+            assert!(all(&good[..n]).is_err(), "cut at {n} accepted");
+        }
+        // an unknown tag
+        assert!(invalid(b"Z").contains("bad tag"));
+        // a length over the limit, for a path and for a symlink target
+        assert!(invalid(&raw(&[b"D", &5000u32.to_be_bytes()])).contains("too long"));
+        assert!(invalid(&raw(&[b"L", &s(b"l"), &u32::MAX.to_be_bytes()])).contains("too long"));
+        // a file claiming more data than there is: an error, without
+        // allocating its size
+        assert!(invalid(&raw(&[b"F", &s(b"f"), &m, &u64::MAX.to_be_bytes(), b"abc"])).contains("UnexpectedEof"));
+        let huge = raw(&[b"F", &s(b"f"), &m, &u64::MAX.to_be_bytes(), b"abc"]);
+        let mut r = StreamReader::new(&huge[..]);
+        r.next().unwrap();
+        assert!(r.data_to(&mut io::sink()).is_err());
+    }
+
+    #[test]
+    fn oversized_frames_are_refused() {
+        let mut hdr = vec![1u8];
+        hdr.extend_from_slice(&((MAX_FRAME + 1) as u32).to_be_bytes());
+        let e = read_frame(&mut &hdr[..]).expect_err("refused");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        let mut buf = vec![];
+        write_frame(&mut buf, 7, b"hi").unwrap();
+        assert_eq!(read_frame(&mut &buf[..]).unwrap(), (7, b"hi".to_vec()));
+        assert!(read_frame(&mut &buf[..buf.len() - 1]).is_err(), "a short frame is an error");
+    }
+}

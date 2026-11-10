@@ -690,3 +690,35 @@ impl Drop for TestDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::safe_rel_path;
+
+    #[test]
+    fn safe_rel_path_refuses_what_could_leave_the_directory() {
+        let long = vec![b'a'; 256];
+        let deep = [b"a/".repeat(2048), b"a".to_vec()].concat();
+        for bad in [
+            &b""[..],
+            b"/etc/passwd",
+            b"..",
+            b"../x",
+            b"a/../../x",
+            b"a/..",
+            b".",
+            b"./a",
+            b"a/./b",
+            b"a//b",
+            b"a/",
+            b"a\0b",
+            &long,
+            &deep,
+        ] {
+            assert!(safe_rel_path(bad).is_none(), "accepted {:?}", String::from_utf8_lossy(bad));
+        }
+        for good in [&b"a"[..], b"a/b/c", b"...", b"..a", b"a..", b".git/HEAD", b"\xff\xfe", b"a b/\x1b[31m"] {
+            assert!(safe_rel_path(good).is_some(), "refused {:?}", String::from_utf8_lossy(good));
+        }
+    }
+}
