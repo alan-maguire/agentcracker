@@ -683,7 +683,15 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         Ok(fc) => fc,
         Err(e) => {
             // e.g. unprivileged user namespaces are not allowed here
-            eprintln!("agentcracker: running Firecracker without its sandbox ({e})");
+            let restricted = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").is_ok_and(|v| v.trim() == "1");
+            if restricted {
+                eprintln!(
+                    "agentcracker: running Firecracker without its sandbox: AppArmor restricts unprivileged user \
+                     namespaces here ({e}); `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` allows them"
+                );
+            } else {
+                eprintln!("agentcracker: running Firecracker without its sandbox ({e})");
+            }
             spawn(None).ctx(format!("starting {}", fc_bin.display()))?
         }
     };

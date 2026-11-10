@@ -515,7 +515,10 @@ compiles from Firecracker's own policy with the glibc spellings of its
 syscalls added.  Where unprivileged user namespaces are not allowed
 (Ubuntu 24.04 and later restrict them through AppArmor, for example),
 agentcracker says `running Firecracker without its sandbox` and runs it
-as before.
+as before.  On Ubuntu, `sudo sysctl
+kernel.apparmor_restrict_unprivileged_userns=0` allows them (put it in
+`/etc/sysctl.d/` to keep it), or an AppArmor profile giving
+`agentcracker` the `userns` permission.
 
 ### The guest kernel
 

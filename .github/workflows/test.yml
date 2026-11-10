@@ -41,6 +41,11 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
 
+      # Ubuntu's AppArmor refuses unprivileged user namespaces, which
+      # Firecracker's sandbox is built from (t10 checks it)
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       # The runner's filesystem has no reflinks, so the guest's /usr snapshot
       # is a real copy: drop the large preinstalled SDKs the tests never use.
       - name: Free disk space
