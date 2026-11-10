@@ -40,11 +40,13 @@ again as the tree.  Leave out build output you don't need in the VM with
 `exclude = [...]` in `.agentcracker.toml` (e.g. `exclude = ["*.o", "*.ko",
 "/vmlinux*"]`).
 
-Requirements: Linux x86_64, read/write access to `/dev/kvm` (the `kvm`
-group), `vhost_vsock`, and the build tools `make check-deps` lists (Rust,
-a C toolchain, kernel build deps, glibc-static, e2fsprogs).  The kernel
-build (6.18 LTS, Firecracker's CI config plus `kernel/agentcracker.config`)
-takes a few minutes once; see [The guest kernel](#the-guest-kernel) for details.
+Requirements: Linux x86_64 (aarch64 is supported in the build but
+untested, and has no `acrboot`), read/write access to `/dev/kvm` (the
+`kvm` group), `vhost_vsock`, and the build tools `make check-deps` lists
+(Rust, a C toolchain, kernel build deps, glibc-static, e2fsprogs).  The
+kernel build (6.18 LTS, Firecracker's CI config plus
+`kernel/agentcracker.config`) takes a few minutes once; see [The guest
+kernel](#the-guest-kernel) for details.
 
 ## A session
 
@@ -453,7 +455,12 @@ Without `--branch`, the commits are imported as `agentcracker/<id>`
 
 ## Limitations
 
-- **Linux on x86_64 with KVM only.**  Firecracker doesn't run on macOS.
+- **Linux with KVM only**: x86_64, and aarch64 untested.  Firecracker
+  doesn't run on macOS.  On aarch64 there is no `acrboot`: Firecracker
+  gives guests no EL2, so they cannot run VMs of their own, and `boot =
+  true` is ignored with a warning.  Building there is `make` as usual;
+  its paths (the guest kernel, the seccomp policy) have not been run on
+  arm64 hardware yet.
 - **No root in the guest**: the agent runs as you, so it can't `sudo`
   or install system packages (but can install into its own `$HOME`).
 - **A snapshot, not a live view**: the agent doesn't see edits you make
@@ -530,11 +537,13 @@ your user:
    from cdn.kernel.org into `build/` and check it against the SHA-256
    pinned in the `Makefile` (`KVER`, `KSHA256`).  To move to a newer
    point release, update both variables.
-2. Start from Firecracker's own guest config,
-   `firecracker/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config`
+2. Start from Firecracker's own guest config for the host's
+   architecture,
+   `firecracker/resources/guest_configs/microvm-kernel-ci-<arch>-6.18.config`
    (from the `firecracker` submodule) - the minimal virtio-mmio,
    serial-console, no-PCI config Firecracker tests against.
-3. Merge in `kernel/agentcracker.config` with
+3. Merge in `kernel/agentcracker.config`, and
+   `kernel/agentcracker-<arch>.config` if there is one, with
    `scripts/kconfig/merge_config.sh`, then `make olddefconfig`.  The
    additions are:
    - EROFS (with xattrs, POSIX ACLs and security labels) for the
@@ -544,11 +553,14 @@ your user:
    - vsock, ext4 (scratch disk) and auto-mounted devtmpfs;
    - cgroups, user namespaces, veth and tun, so podman works in the guest;
    - `CONFIG_MODULES` off: everything is built in, and there is no
-     initramfs.
-4. `make vmlinux` (not `bzImage`: Firecracker boots the uncompressed
-   ELF on x86) and copy the result to `build/vmlinux-$(KVER)`.
+     initramfs;
+   - on x86_64 (`agentcracker-x86_64.config`), KVM for `acrboot`.
+4. Build the image Firecracker boots and copy it to
+   `build/vmlinux-$(KVER)`: on x86_64 `make vmlinux` (the uncompressed
+   ELF, not `bzImage`); on aarch64 `make Image` (`arch/arm64/boot/Image`,
+   still installed under the name `vmlinux`).
 
-The kernel is rebuilt when `kernel/agentcracker.config` or Firecracker's
+The kernel is rebuilt when `kernel/agentcracker*.config` or Firecracker's
 base config changes (for example after a submodule update), or when
 `KVER` changes.  The first build takes a few minutes; after that it is
 cached in `build/`.
@@ -568,7 +580,8 @@ To try a different kernel, build it with the same config and point
 
 **Booting.**  Firecracker gets the kernel as `kernel_image_path`, with
 `root=/dev/vda ro rootfstype=erofs init=/acinit` plus `pci=off
-nomodule` and `quiet` unless `--console` is given.  It reaches PID 1
+nomodule` (and on x86_64 the `i8042.*` options that skip PS/2 probing;
+on aarch64 `keep_bootcon`), and `quiet` unless `--console` is given.  It reaches PID 1
 in ~100ms.
 
 **Licensing.**  The kernel is GPL-2.0.  Building it locally raises no

@@ -117,6 +117,8 @@ pub fn hash_file(p: &Path) -> Option<String> {
 /// than by the guest removing `/dev/kvm`: a guest whose kernel the agent
 /// took over cannot reach the host's nested virtualisation code.  Both
 /// leaves exist on Intel and AMD; the other vendor's bit is already 0.
+/// x86_64 only: CPUID templates are an x86 feature (and aarch64 guests get
+/// no EL2 to hide).
 fn no_nested_virt() -> serde_json::Value {
     let clear = |bit: usize| format!("0b{}0{}", "x".repeat(31 - bit), "x".repeat(bit));
     serde_json::json!({
@@ -525,14 +527,30 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
     });
     crate::proxy::serve(proxy_l, proxy);
 
+    // acrboot only where it can work (see crate::acrboot::SUPPORTED)
+    let boot = cfg.boot && crate::acrboot::SUPPORTED;
+    if cfg.boot && !boot {
+        eprintln!(
+            "agentcracker: `boot = true` is ignored on {}: test kernels need nested virtualisation, \
+             which Firecracker provides on x86_64 only",
+            std::env::consts::ARCH
+        );
+    }
     let mut args = String::from(
-        "console=ttyS0 reboot=k panic=1 pci=off nomodule i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd \
-         random.trust_cpu=on root=/dev/vda ro rootfstype=erofs init=/acinit",
+        "console=ttyS0 reboot=k panic=1 pci=off nomodule random.trust_cpu=on root=/dev/vda ro rootfstype=erofs init=/acinit",
     );
+    // x86: no PS/2 probing (the i8042 is there only so that a reset stops
+    // the VM); aarch64: keep the early console, as Firecracker's own
+    // examples do (a reset there is a PSCI call, which stops it too)
+    args.push_str(if cfg!(target_arch = "x86_64") {
+        " i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd"
+    } else {
+        " keep_bootcon"
+    });
     if !console {
         args.push_str(" quiet loglevel=1");
     }
-    if cfg.boot {
+    if boot {
         // for acrboot's messages only (see crate::acrboot::BOOT_ARG)
         args.push(' ');
         args.push_str(crate::acrboot::BOOT_ARG);
@@ -579,7 +597,8 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         "vsock": {"guest_cid": 3, "uds_path": uds},
         "entropy": {},
     });
-    if !cfg.boot {
+    // (x86_64 only: elsewhere guests get no hardware virtualisation at all)
+    if !boot && cfg!(target_arch = "x86_64") {
         fc_cfg["cpu-config"] = no_nested_virt();
     }
     let cfg_path = rundir.join("firecracker.json");
@@ -611,7 +630,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
         dev_scratch: "/dev/vde".into(),
         dev_lower_delta: lower_delta.as_ref().map(|_| "/dev/vdf".into()),
         dev_cache: dev_cache.clone(),
-        boot: cfg.boot,
+        boot,
         git_branch: s.meta.work_branch.clone().zip(s.meta.git_head.clone()).filter(|_| first_boot),
         agent_files: crate::guidance::agent_files(
             profile,
@@ -621,7 +640,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
                 net,
                 allow: &s.meta.allow,
                 cache: dev_cache.is_some(),
-                boot: cfg.boot,
+                boot,
                 branch: s.meta.work_branch.as_deref(),
                 vcpus: s.meta.vcpus,
                 mem_mib: s.meta.mem_mib,

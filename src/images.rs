@@ -84,7 +84,7 @@ pub fn find_asset(name: &str) -> Result<PathBuf> {
             cands.push(bin.join("../lib/agentcracker").join(name));
             // running from a source checkout: target/release/agentcracker
             let repo = bin.join("../..");
-            let triple = "x86_64-unknown-linux-gnu";
+            let triple = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
             match name {
                 "firecracker" => cands.push(repo.join(format!("firecracker/build/cargo_target/{triple}/release/firecracker"))),
                 "seccomp.bpf" => cands.push(repo.join("build/seccomp.bpf")),

@@ -12,6 +12,16 @@ kernel=$(ls "$REPO"/build/vmlinux-* 2>/dev/null | head -1)
 new_project
 cp "$kernel" vmlinux
 
+if [ "$(uname -m)" != x86_64 ]; then
+    # Firecracker gives guests no hardware virtualisation here
+    step "not available on $(uname -m)"
+    set_config 'boot = true'
+    ac_run sh -c 'acrboot vmlinux; echo rc=$?'
+    assert_contains "$AC_ERR" "\`boot = true\` is ignored on $(uname -m)" "boot = true is ignored, with a warning"
+    assert_contains "$AC_ERR$AC_OUT" "x86_64 only" "acrboot says why it cannot run"
+    finish
+fi
+
 step "off by default"
 ac_run sh -c 'acrboot vmlinux; echo rc=$?; test -e /dev/kvm && echo kvm'
 assert_contains "$AC_OUT" "rc=2" "acrboot fails"

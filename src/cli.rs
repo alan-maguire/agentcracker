@@ -259,8 +259,16 @@ pub fn run(args: Vec<String>) -> Result<i32> {
                     // uses tkill; firecracker kicks vCPU threads with it on
                     // shutdown, so without it every VM exit is a SIGSYS kill
                     // plus a core dump of guest memory); getpid is what glibc's
-                    // raise() calls first
-                    for sc in ["epoll_wait", "tgkill", "getpid"] {
+                    // raise() calls first.  aarch64 has no epoll_wait (glibc
+                    // uses epoll_pwait there too), and seccompiler refuses
+                    // names the target does not have.  (The aarch64 list is
+                    // untested: glibc may differ from musl there in other
+                    // ways too.)
+                    let mut extra = vec!["tgkill", "getpid"];
+                    if cfg!(target_arch = "x86_64") {
+                        extra.push("epoll_wait");
+                    }
+                    for sc in extra {
                         f.push(serde_json::json!({ "syscall": sc, "comment": "glibc (agentcracker)" }));
                     }
                     // glibc's pthread_join/condvars wait with FUTEX_WAIT_BITSET,

@@ -370,10 +370,12 @@ for conflicting text files.)
   Landlock (unprivileged, but not enabled in every kernel).
 - No TAP device, no bridge, no iptables - so no root.  `/dev/kvm`
   access is the only requirement.
-- With `boot = true`, the guest also gets nested virtualisation, so
-  the host's KVM nested code (nVMX/nSVM) faces a kernel the agent
-  controls.  Without it the host hides VMX and SVM from the guest (a
-  Firecracker CPU template), so that code is out of reach.
+- With `boot = true` (x86_64 only: on aarch64 Firecracker gives guests
+  no EL2, so there is nothing to enable, or to hide), the guest also
+  gets nested virtualisation, so the host's KVM nested code (nVMX/nSVM)
+  faces a kernel the agent controls.  Without it the host hides VMX and
+  SVM from the guest (a Firecracker CPU template), so that code is out
+  of reach.
 - The host-side services the guest can reach are: the control
   connection (which carries the terminal stream), and a CONNECT proxy
   with an allowlist.  (`agentcracker shell` also connects to a server in

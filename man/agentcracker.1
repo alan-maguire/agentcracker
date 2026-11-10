@@ -430,6 +430,9 @@ acrboot [\-\-cpus N] [\-\-mem SIZE] [\-\-timeout SECS] [\-\-append ARGS]
         [\-\-disk FILE]... [\-\-run CMD [\-\-dir DIR]] VMLINUX
 .EE
 .PP
+x86_64 only: on aarch64 Firecracker gives guests no EL2, and
+.B boot = true
+is ignored with a warning.
 The session's VM has nested virtualisation for this: the kernel boots in
 a Firecracker microVM of its own inside the session's, and its serial
 console is shown.  The host's KVM must allow it

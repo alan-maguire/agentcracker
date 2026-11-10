@@ -308,8 +308,8 @@ require_vm() {
     [ -r /dev/kvm ] && [ -w /dev/kvm ] || skip_test "/dev/kvm is not accessible"
     if [ -z "${AGENTCRACKER:-}" ]; then
         local f
-        for f in "$REPO/build/acinit-target/x86_64-unknown-linux-gnu/release/agentcracker" \
-                 "$REPO/firecracker/build/cargo_target/x86_64-unknown-linux-gnu/release/firecracker"; do
+        for f in "$REPO/build/acinit-target/$(uname -m)-unknown-linux-gnu/release/agentcracker" \
+                 "$REPO/firecracker/build/cargo_target/$(uname -m)-unknown-linux-gnu/release/firecracker"; do
             [ -x "$f" ] || skip_test "missing $f (run make)"
         done
         ls "$REPO"/build/vmlinux-* >/dev/null 2>&1 || skip_test "no guest kernel in build/ (run make)"

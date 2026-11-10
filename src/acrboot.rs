@@ -53,6 +53,12 @@ use std::time::{Duration, Instant};
 
 use crate::util::{Context, Result};
 
+/// Whether test kernels can be booted on this architecture at all: they
+/// run nested in the session's VM, and Firecracker gives guests hardware
+/// virtualisation on x86_64 only (VMX/SVM; on aarch64 it never gives them
+/// EL2).  Elsewhere `boot = true` is ignored, with a warning.
+pub const SUPPORTED: bool = cfg!(target_arch = "x86_64");
+
 /// Where the base image has Firecracker and its seccomp filter.
 pub const FIRECRACKER: &str = "/acboot/firecracker";
 pub const SECCOMP: &str = "/acboot/seccomp.bpf";
@@ -430,6 +436,12 @@ pub const BOOT_ARG: &str = "agentcracker.boot=1";
 fn check_kvm() -> Result<()> {
     if std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok() && Path::new(FIRECRACKER).exists() {
         return Ok(());
+    }
+    if !SUPPORTED {
+        crate::bail!(
+            "booting test kernels needs nested virtualisation, which Firecracker provides on x86_64 only (this is {})",
+            std::env::consts::ARCH
+        );
     }
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     if !cmdline.split_whitespace().any(|a| a == BOOT_ARG) {

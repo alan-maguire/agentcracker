@@ -69,15 +69,23 @@ cargo doc --document-private-items --open
 
 ## 2. Building and installing
 
-`make` builds four artefacts as your user:
+`make` builds four artefacts as your user, for the host's architecture
+(`uname -m`: x86_64, or aarch64 - built the same way, untested, without
+acrboot):
 
 | Artefact | Built from | Notes |
 |---|---|---|
 | `target/release/agentcracker` | this crate | the host CLI |
 | `build/acinit-target/.../agentcracker` | this crate, `+crt-static` | the guest init; installed as `acinit` |
 | `firecracker/build/.../firecracker` | the `firecracker` submodule | gnu target, linked against libseccomp |
-| `build/vmlinux-<KVER>` | kernel.org tarball (SHA-256 pinned) | Firecracker's CI config + `kernel/agentcracker.config` |
-| `build/seccomp.bpf` | Firecracker's musl policy, adapted | `agentcracker __seccomp-json` adds glibc's syscall spellings, then `seccompiler-bin` compiles it |
+| `build/vmlinux-<KVER>` | kernel.org tarball (SHA-256 pinned) | Firecracker's CI config for the architecture + `kernel/agentcracker.config` + `kernel/agentcracker-<arch>.config`; the ELF `vmlinux` on x86_64, `arch/arm64/boot/Image` on aarch64 (still named `vmlinux`) |
+| `build/seccomp.bpf` | Firecracker's musl policy for the architecture, adapted | `agentcracker __seccomp-json` adds glibc's syscall spellings (the architecture's own: aarch64 has no `epoll_wait`), then `seccompiler-bin` compiles it |
+
+What differs by architecture at run time is in `vm::boot`: the kernel
+command line (`i8042.*` on x86_64, `keep_bootcon` on aarch64), and the
+CPU template hiding VMX/SVM (x86_64 only).  `acrboot::SUPPORTED` is
+false off x86_64, where Firecracker gives guests no EL2: `boot = true` is
+ignored there with a warning, and acrboot says why it cannot run.
 
 `make install` (optionally `PREFIX=~/.local`) only copies files.  It
 never builds, so `sudo make install` cannot leave root-owned build output
@@ -436,7 +444,7 @@ reaches the host, and how each one is handled:
 | Secrets in git's configuration | The guest's `~/.gitconfig` is written by agentcracker with `user.name` and `user.email` only (`guidance::git_identity`), on every boot; the user's own (`sendemail.smtpPass`, tokens in URLs or headers, credential helpers) never enters the VM. |
 | Secrets in the snapshots | The project snapshot's `.git/config` has `user:token@` stripped from URLs and `extraheader` lines dropped; the toolchain snapshot excludes cargo, npm, PyPI, netrc and git credential files; new sessions warn about credential-like project files (`images::credential_like`). |
 | Network | No NIC; HTTPS `CONNECT` only, to allowlisted hosts (port 443 unless `host:port` is listed); DNS resolved on the host; decisions logged. |
-| Test kernels (`acrboot`) | Off unless the user's config says `boot = true` (a project's cannot); otherwise the host hides VMX and SVM from the guest (a Firecracker CPU template: its KVM then refuses VMXON and EFER.SVME), so a guest kernel the agent took over cannot reach the host's nested-virtualisation code either, and acinit removes `/dev/kvm`; with it acinit makes `/dev/kvm` the user's.  Nothing runs on the host: the test VM is a Firecracker nested in the session's VM (its CPUs, memory and disk), with no network and no vsock, killed on timeout, a few seconds after a panic, and with the session.  The agent controls that VM's kernel, and the host's KVM handles its exits first, so the boundary there is the host's nested-virtualisation code against ring 0.  Its records reach the host as state (`boot.log` lines parsed strictly and escaped when shown, consoles capped at 4M × 20). |
+| Test kernels (`acrboot`) | x86_64 only (`acrboot::SUPPORTED`).  Off unless the user's config says `boot = true` (a project's cannot); otherwise the host hides VMX and SVM from the guest (a Firecracker CPU template: its KVM then refuses VMXON and EFER.SVME), so a guest kernel the agent took over cannot reach the host's nested-virtualisation code either, and acinit removes `/dev/kvm`; with it acinit makes `/dev/kvm` the user's.  Nothing runs on the host: the test VM is a Firecracker nested in the session's VM (its CPUs, memory and disk), with no network and no vsock, killed on timeout, a few seconds after a panic, and with the session.  The agent controls that VM's kernel, and the host's KVM handles its exits first, so the boundary there is the host's nested-virtualisation code against ring 0.  Its records reach the host as state (`boot.log` lines parsed strictly and escaped when shown, consoles capped at 4M × 20). |
 | Firecracker | Runs as the user, with the compiled seccomp filter, which is required: a session does not start without it (a glibc Firecracker given no `--seccomp-filter` installs an allow-all one).  **No jailer** (it needs root, which conflicts with the rootless goal); instead `jail.rs` builds the same without privileges, between fork and exec: new user (own uid only), mount, network, IPC, UTS and cgroup namespaces; `pivot_root` onto a tmpfs holding only the binary and system libraries, the kernel, the session's disks (read-only except scratch and the cache), the runtime directory and `/dev/kvm`; `no_new_privs`, no core dumps, at most 4096 files.  If the namespaces are refused, it runs without them, with a warning.  No cgroup limit yet.  t10 checks what Firecracker can see. |
 
 What goes into the guest is limited too.  `/etc` is copied from an

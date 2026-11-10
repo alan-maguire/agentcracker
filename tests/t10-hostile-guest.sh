@@ -179,7 +179,7 @@ assert_match "$(grep NoNewPrivs /proc/$pid/status)" '1$' "no_new_privs is set"
 step "Firecracker never runs without its seccomp filter"
 # an install with every asset but the filter: a gnu Firecracker would
 # otherwise run with an allow-all filter
-t=x86_64-unknown-linux-gnu
+t=$(uname -m)-unknown-linux-gnu
 fc=$REPO/firecracker/build/cargo_target/$t/release/firecracker
 init=$REPO/build/acinit-target/$t/release/agentcracker
 kern=$(ls "$REPO"/build/vmlinux-* 2>/dev/null | tail -1)
