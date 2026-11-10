@@ -582,7 +582,7 @@ test` runs them all against the in-tree build; `tests/run.sh apply
 resume` runs a subset, and any `tests/tNN-*.sh` runs on its own.
 `AGENTCRACKER=/usr/local/bin/agentcracker` tests an installed copy.
 They need `/dev/kvm`, and keep a failing test's work directory under
-`build/tests/`.
+`~/.cache/agentcracker-tests/`.
 
 ## License
 

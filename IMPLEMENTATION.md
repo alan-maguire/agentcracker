@@ -706,7 +706,9 @@ output capped), and parses that the same way.
   never use, and the tests run with a minimal `PATH` so no toolchains are
   snapshotted.
   A failing test's work directory and sessions are kept under
-  `build/tests/`.
+  `~/.cache/agentcracker-tests/` (`AC_TEST_DIR`; CI uses `build/tests/`
+  and uploads their logs).  Not in the repository: a session there would
+  snapshot them, 64G sparse disks and all.
 
 ## 9. Debugging and development aids
 

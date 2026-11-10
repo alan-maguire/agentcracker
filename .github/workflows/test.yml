@@ -135,6 +135,7 @@ jobs:
       - name: Test
         env:
           AC_TEST_CONFIG: ${{ github.workspace }}/build/ci-config/agentcracker/config.toml
+          AC_TEST_DIR: ${{ github.workspace }}/build/tests
         run: PATH=/usr/sbin:/usr/bin:/sbin:/bin tests/run.sh
 
       - name: Save guest kernel

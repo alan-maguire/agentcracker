@@ -11,8 +11,10 @@
 #   AGENTCRACKER     binary under test (default: the in-tree target/release build;
 #                    its assets - firecracker, kernel, acinit - are found
 #                    relative to it, so in-tree builds test in-tree assets)
-#   AC_TEST_DIR      where per-test work dirs go (default: build/tests; keep it
-#                    on the same filesystem as ~/.cache so snapshots hardlink)
+#   AC_TEST_DIR      where per-test work dirs go (default:
+#                    ~/.cache/agentcracker-tests: outside the repository, which
+#                    sessions snapshot, and on the same filesystem as
+#                    ~/.cache so snapshots hardlink)
 #   AC_KEEP=1        keep work dirs and sessions even when the test passes
 #   AC_TEST_CONFIG   a config.toml every test starts from (and set_config
 #                    adds to), e.g. CI's exclude_usr to keep the /usr
@@ -358,8 +360,11 @@ finish() {
     exit 0
 }
 
-_TEST_ROOT=${AC_TEST_DIR:-$REPO/build/tests}
+_TEST_ROOT=${AC_TEST_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/agentcracker-tests}
 mkdir -p "$_TEST_ROOT"
+# kept work dirs hold sessions with 64G sparse disks: say when they pile up
+_kept=$(find "$_TEST_ROOT" -mindepth 1 -maxdepth 1 -type d | wc -l)
+[ "$_kept" -gt 10 ] && log "note: $_kept kept work dirs in $_TEST_ROOT (failed or AC_KEEP runs); remove them when done"
 WORK=$(mktemp -d "$_TEST_ROOT/$TEST_NAME.XXXX")
 export XDG_STATE_HOME=$WORK/state
 export XDG_CONFIG_HOME=$WORK/config
