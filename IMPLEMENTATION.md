@@ -708,8 +708,12 @@ output capped), and parses that the same way.
   `.github/workflows/test.yml` runs `make test` on GitHub's Linux runners
   (which have KVM) for every push and pull request, caching the guest
   kernel, firecracker and cargo builds, and fails the job if any test
-  fails; logs of failed tests are uploaded as an artifact.  The runner
-  has no reflinks, so CI keeps the snapshots small: `AC_TEST_CONFIG`
+  fails; logs of failed tests are uploaded as an artifact.  It runs once
+  per architecture, with caches keyed by it: x86_64 must pass; aarch64
+  (`ubuntu-24.04-arm`, or the runner the repository variable
+  `AARCH64_RUNNER` names) may fail without failing the run, and on a
+  runner without a usable `/dev/kvm` only builds, with a warning.  The
+  runner has no reflinks, so CI keeps the snapshots small: `AC_TEST_CONFIG`
   gives every test a config with `exclude_usr` entries for what the tests
   never use, and the tests run with a minimal `PATH` so no toolchains are
   snapshotted.

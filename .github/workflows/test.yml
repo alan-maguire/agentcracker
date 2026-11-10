@@ -1,5 +1,11 @@
-# Build agentcracker (firecracker, guest kernel, tool) and run tests/ on a
-# GitHub-hosted runner, which supports KVM.  Any failing test fails the job.
+# Build agentcracker (firecracker, guest kernel, tool) and run tests/, on
+# x86_64 and aarch64.  On x86_64 (GitHub's hosted runners have KVM) any
+# failing test fails the run.  aarch64 is experimental: its job may fail
+# without failing the run, and where its runner has no usable /dev/kvm it
+# builds only and says so.  GitHub's hosted arm64 runners (free for public
+# repositories) are not documented to expose KVM; to test there, point the
+# repository variable AARCH64_RUNNER at a runner that has it, e.g. a
+# self-hosted Graviton .metal instance (Ubuntu, with passwordless sudo).
 name: tests
 
 # main and pull requests only (a pushed PR branch would otherwise run
@@ -19,8 +25,20 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            experimental: false
+          - arch: aarch64
+            runner: ${{ vars.AARCH64_RUNNER || 'ubuntu-24.04-arm' }}
+            experimental: true
     env:
       # nested virtualisation on a shared runner is slower than a workstation;
       # these are t02-timing.sh's limits (seconds)
@@ -33,18 +51,41 @@ jobs:
         with:
           submodules: true
 
+      - name: Check the architecture
+        run: test "$(uname -m)" = "${{ matrix.arch }}"
+
+      # without KVM there is nothing to test, only the build: an error on
+      # x86_64, a warning on aarch64
       - name: Enable KVM for the runner user
+        id: kvm
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          ls -l /dev/kvm
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            sleep 1
+            ls -l /dev/kvm
+          fi
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "usable=false" >> "$GITHUB_OUTPUT"
+            msg="no usable /dev/kvm on this ${{ matrix.arch }} runner (${{ matrix.runner }})"
+            if [ "${{ matrix.arch }}" = x86_64 ]; then
+              echo "::error::$msg"
+              exit 1
+            fi
+            echo "::warning::$msg: building only, tests skipped; set the AARCH64_RUNNER variable to a runner with KVM"
+            echo "**${{ matrix.arch }}: built only, tests skipped** - $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Ubuntu's AppArmor refuses unprivileged user namespaces, which
       # Firecracker's sandbox is built from (t10 checks it)
       - name: Allow unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          f=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e $f ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
 
       # The runner's filesystem has no reflinks, so the guest's /usr snapshot
       # is a real copy: drop the large preinstalled SDKs the tests never use.
@@ -77,14 +118,14 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/vmlinux-${{ steps.keys.outputs.kver }}
-          key: vmlinux-${{ steps.keys.outputs.kver }}-${{ hashFiles('kernel/agentcracker*.config', 'firecracker/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config') }}
+          key: vmlinux-${{ matrix.arch }}-${{ steps.keys.outputs.kver }}-${{ hashFiles('kernel/agentcracker*.config', format('firecracker/resources/guest_configs/microvm-kernel-ci-{0}-6.18.config', matrix.arch)) }}
 
       - name: Restore firecracker build
         id: firecracker
         uses: actions/cache/restore@v4
         with:
           path: firecracker/build/cargo_target
-          key: firecracker-${{ steps.keys.outputs.fc }}
+          key: firecracker-${{ matrix.arch }}-${{ steps.keys.outputs.fc }}
 
       - name: Restore cargo
         id: cargo
@@ -97,7 +138,7 @@ jobs:
             build/acinit-target
           # one entry per Cargo.lock, not per commit: our own crate rebuilds in
           # seconds, and a ~1G entry per push would churn the 10G repo cache
-          key: cargo-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build
         run: |
@@ -116,6 +157,7 @@ jobs:
       # toolchain snapshot for the same reason.  The snapshot is built in a
       # step of its own so its cost shows; the tests then reuse it.
       - name: Snapshot /usr
+        if: steps.kvm.outputs.usable == 'true'
         run: |
           mkdir -p build/ci-config/agentcracker
           cat >build/ci-config/agentcracker/config.toml <<'TOML'
@@ -133,6 +175,7 @@ jobs:
           df -h /
 
       - name: Test
+        if: steps.kvm.outputs.usable == 'true'
         env:
           AC_TEST_CONFIG: ${{ github.workspace }}/build/ci-config/agentcracker/config.toml
           AC_TEST_DIR: ${{ github.workspace }}/build/tests
@@ -169,7 +212,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: failed-test-logs
+          name: failed-test-logs-${{ matrix.arch }}
           path: |
             build/tests/**/ac.log
             build/tests/**/meta.json
