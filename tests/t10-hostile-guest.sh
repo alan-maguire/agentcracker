@@ -176,4 +176,24 @@ assert_match "$(grep '^Max core file size' /proc/$pid/limits)" ' 0 +0 ' "no core
 assert_match "$(grep NoNewPrivs /proc/$pid/status)" '1$' "no_new_privs is set"
 "$AC" stop "$id" >/dev/null 2>&1
 
+step "Firecracker never runs without its seccomp filter"
+# an install with every asset but the filter: a gnu Firecracker would
+# otherwise run with an allow-all filter
+t=x86_64-unknown-linux-gnu
+fc=$REPO/firecracker/build/cargo_target/$t/release/firecracker
+init=$REPO/build/acinit-target/$t/release/agentcracker
+kern=$(ls "$REPO"/build/vmlinux-* 2>/dev/null | tail -1)
+if [ -x "$fc" ] && [ -x "$init" ] && [ -n "$kern" ]; then
+    mkdir -p "$WORK/inst/bin" "$WORK/inst/lib/agentcracker"
+    cp "$AC" "$WORK/inst/bin/agentcracker"
+    ln -s "$fc" "$WORK/inst/lib/agentcracker/firecracker"
+    ln -s "$init" "$WORK/inst/lib/agentcracker/acinit"
+    ln -s "$kern" "$WORK/inst/lib/agentcracker/vmlinux"
+    "$WORK/inst/bin/agentcracker" true </dev/null >"$WORK/last.out" 2>"$WORK/last.err"
+    assert_ne "$?" "0" "a session does not start"
+    assert_contains "$(cat "$WORK/last.err")" "cannot find seccomp.bpf" "saying the filter is missing"
+else
+    info "(skipped: needs the build tree)"
+fi
+
 finish

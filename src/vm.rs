@@ -3,8 +3,8 @@
 //! [`boot`] is one run of the VM.  It gathers the images (base, /usr,
 //! toolchains, plus the session's project snapshot and scratch disk),
 //! writes a Firecracker config file, listens on the vsock unix sockets,
-//! starts Firecracker (`--no-api`, with the compiled seccomp filter when it
-//! is installed, in the sandbox `crate::jail` builds) and hands over to [`attach`], which drives the control
+//! starts Firecracker (`--no-api`, with the compiled seccomp filter, in the
+//! sandbox `crate::jail` builds) and hands over to [`attach`], which drives the control
 //! protocol (see `crate::proto`):
 //!
 //! 1. accept the guest's control connection (waiting up to 30 s);
@@ -490,11 +490,14 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
     let fc_bin = images::find_asset("firecracker")?;
     let vmlinux = images::find_asset("vmlinux")?;
     let acinit = images::find_asset("acinit")?;
+    // required: without --seccomp-filter, a glibc build of Firecracker
+    // installs an allow-all filter
+    let seccomp = images::find_asset("seccomp.bpf")?;
     if std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_err() {
         crate::bail!("cannot open /dev/kvm: add yourself to the kvm group (sudo usermod -aG kvm $USER)");
     }
 
-    let base = images::base_image(&acinit, &fc_bin)?;
+    let base = images::base_image(&acinit, &fc_bin, &seccomp)?;
     crate::util::mark("base image");
     let usr = images::usr_image(cfg, Refresh::Auto)?;
     crate::util::mark("usr image check");
@@ -632,11 +635,10 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
     crate::util::mark("home seed built");
     s.meta.cred_seed = hash_file(&home().join(credential_path(profile)));
 
-    let seccomp = images::find_asset("seccomp.bpf").ok();
     // Firecracker's sandbox (see crate::jail): what it may see
     let mut ro: Vec<&Path> = vec![&fc_bin, &vmlinux, &base, &usr, &tools_img, &lower];
     ro.extend(lower_delta.as_deref());
-    ro.extend(seccomp.as_deref());
+    ro.push(&seccomp);
     let mut rw: Vec<&Path> = vec![&scratch, &rundir];
     rw.extend(cache.as_ref().map(|c| c.image.as_path()));
     let jail = Arc::new(crate::jail::Jail::new(&rundir.join("root"), &ro, &rw)?);
@@ -660,9 +662,7 @@ pub fn boot(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first_
             .stdin(Stdio::null());
         // firecracker's own x86_64 policy, compiled at install time (gnu
         // builds otherwise default to an allow-all filter)
-        if let Some(f) = &seccomp {
-            c.arg("--seccomp-filter").arg(f);
-        }
+        c.arg("--seccomp-filter").arg(&seccomp);
         match &log {
             Some(l) => c.stdout(l.try_clone()?).stderr(l.try_clone()?),
             None => c.stdout(Stdio::inherit()).stderr(Stdio::inherit()),

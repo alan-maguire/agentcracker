@@ -1130,8 +1130,8 @@ fn cmd_refresh(args: &[String]) -> Result<i32> {
     if !bg {
         let tools = images::detect_tools(&cfg, &cwd);
         images::tools_image(&cfg, &tools)?;
-        if let (Ok(a), Ok(f)) = (images::find_asset("acinit"), images::find_asset("firecracker")) {
-            images::base_image(&a, &f)?;
+        if let (Ok(a), Ok(f), Ok(sc)) = (images::find_asset("acinit"), images::find_asset("firecracker"), images::find_asset("seccomp.bpf")) {
+            images::base_image(&a, &f, &sc)?;
         }
     }
     Ok(0)

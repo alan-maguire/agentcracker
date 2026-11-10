@@ -665,8 +665,9 @@ fn etc_tree(tree: &mut Tree, etc: usize, stats: &mut WalkStats) -> Result<()> {
 /// usr-merged (programs in a real `/bin` would be missing in the guest).
 ///
 /// `acinit`: path of the static acinit binary; `firecracker`: the
-/// Firecracker binary.  Returns the image path.
-pub fn base_image(acinit: &Path, firecracker: &Path) -> Result<PathBuf> {
+/// Firecracker binary; `seccomp`: its compiled filter.  Returns the image
+/// path.
+pub fn base_image(acinit: &Path, firecracker: &Path, seccomp: &Path) -> Result<PathBuf> {
     let dir = cache_dir().join("base");
     crate::util::mkdir_private(&dir)?;
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -679,10 +680,7 @@ pub fn base_image(acinit: &Path, firecracker: &Path) -> Result<PathBuf> {
     h.str(FORMAT).str(&user).str(&group).u64(uid as u64).u64(gid as u64).bytes(hm.as_os_str().as_bytes()).str(&shell);
     mtime_sig(&mut h, acinit);
     mtime_sig(&mut h, firecracker);
-    let seccomp = find_asset("seccomp.bpf").ok();
-    if let Some(f) = &seccomp {
-        mtime_sig(&mut h, f);
-    }
+    mtime_sig(&mut h, seccomp);
     for name in ETC_ALLOW {
         let mut budget = 200;
         dir_sig(&mut h, &Path::new("/etc").join(name), 1, &mut budget);
@@ -708,9 +706,7 @@ pub fn base_image(acinit: &Path, firecracker: &Path) -> Result<PathBuf> {
     let acboot = t.mkdir_p(Path::new("acboot"), 0o755, 0, 0);
     let fc_data = std::fs::read(firecracker).ctx(format!("read {}", firecracker.display()))?;
     t.add(acboot, b"firecracker", Node::bytes(fc_data, 0o755, 0, 0));
-    if let Some(f) = &seccomp {
-        t.add(acboot, b"seccomp.bpf", Node::bytes(std::fs::read(f).ctx(format!("read {}", f.display()))?, 0o644, 0, 0));
-    }
+    t.add(acboot, b"seccomp.bpf", Node::bytes(std::fs::read(seccomp).ctx(format!("read {}", seccomp.display()))?, 0o644, 0, 0));
     for (d, mode) in [
         ("proc", 0o555), ("sys", 0o555), ("dev", 0o755), ("run", 0o755), ("tmp", 0o1777),
         ("mnt", 0o755), ("scratch", 0o700), ("lower", 0o700), ("lower/base", 0o755),
