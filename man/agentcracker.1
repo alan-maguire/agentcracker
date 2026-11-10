@@ -427,7 +427,7 @@ built:
 .PP
 .EX
 acrboot [\-\-cpus N] [\-\-mem SIZE] [\-\-timeout SECS] [\-\-append ARGS]
-        [\-\-disk FILE]... [\-\-run CMD [\-\-dir DIR]] VMLINUX
+        [\-\-disk FILE]... [\-\-run CMD [\-\-dir DIR]] [\-\-bisect] VMLINUX
 .EE
 .PP
 x86_64 only: on aarch64 Firecracker gives guests no EL2, and
@@ -446,7 +446,16 @@ the guest has no
 and the host hides VMX and SVM from it.
 .B acrboot
 exits 0 when the kernel shut the VM down, 1 on a kernel panic, 124 on a
-timeout and 2 on an error.  The kernel must be the uncompressed ELF
+timeout and 2 on an error.  With
+.B \-\-bisect
+it exits with
+.BR "git bisect run" 's
+codes instead: 0 (good) when the kernel shut the VM down, or with
+.B \-\-run
+the command's status (125 skips); 1 (bad) on a panic, a timeout or the
+command killed by a signal; 128 (stop the bisect) when
+.B acrboot
+itself failed.  The kernel must be the uncompressed ELF
 .I vmlinux
 (not a
 .IR bzImage )
@@ -551,6 +560,16 @@ another repository that ignores it), nothing is.  Include them with
 .B i
 in the review menu, or
 .BR "diff \-\-ignored" " and " "apply \-\-ignored" .
+.PP
+If the agent left its work tree at an older commit (a
+.B "git bisect"
+it did not reset, or a checkout of an ancestor of your HEAD), its changes
+are that commit's version of every file that differs from yours.  The
+review menu and
+.B diff
+say so, there is nothing to import with
+.BR branch ,
+and apply asks first (refusing without a terminal).
 .PP
 Apply writes each file to a temporary name and renames it into place,
 never follows symlinks out of the project directory, drops setuid and

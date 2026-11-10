@@ -6,7 +6,8 @@
 //! second-level microVM with no network and no vsock, CPUs and memory
 //! within the session's, a timeout - and shows its serial console.  It exits with the outcome: 0
 //! when the kernel shut the VM down, 1 on a panic, 124 on a timeout, 2 on
-//! an error.
+//! an error.  With `--bisect` it exits with what `git bisect run` expects
+//! instead ([`bisect_status`]).
 //!
 //! Three uses: a kernel on its own (built-in KUnit suites with
 //! `kunit_shutdown=reboot`, boot smoke tests); a kernel with a root disk
@@ -89,7 +90,7 @@ pub const RESERVE_MIB: u64 = 512;
 const KCONFIG: &str = include_str!("../kernel/acrboot.config");
 
 const USAGE: &str = "usage: acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]...
-               [--run CMD [--dir DIR]] VMLINUX
+               [--run CMD [--dir DIR]] [--bisect] VMLINUX
        acrboot --kconfig    print the kernel options needed to boot under Firecracker
 
 Boot VMLINUX (an uncompressed ELF kernel) in a microVM of its own and show
@@ -114,6 +115,13 @@ Exit status: 0 the kernel shut the VM down, 1 kernel panic, 124 timeout,
 2 error; with --run, CMD's status, or 124 timeout and 125 if the VM ended
 without CMD finishing (a panic).  Defaults: 2 CPUs, 1G, 600s (within this
 VM's CPUs and memory).
+
+--bisect exits with what `git bisect run` expects instead: 0 (good) when
+the kernel shut the VM down, or with --run CMD's status (125 skips the
+commit); 1 (bad) on a panic, a timeout, a VM that ended before CMD
+finished, or CMD killed by a signal; 128 (stop the bisect) when acrboot
+itself failed.  E.g.:
+  git bisect run sh -c 'make -j$(nproc) vmlinux || exit 125; acrboot --bisect --run ./repro.sh vmlinux'
 ";
 
 /// What was asked for.
@@ -129,6 +137,8 @@ struct Request {
     /// `--run`: the command, and the directory copied in for it.
     run: Option<String>,
     dir: Option<PathBuf>,
+    /// `--bisect`: exit with `git bisect run`'s codes ([`bisect_status`]).
+    bisect: bool,
 }
 
 /// What a `--run` test VM is to do: written to its spec disk by `acrboot`,
@@ -154,8 +164,29 @@ pub fn main(args: &[String]) -> i32 {
         Ok(code) => code,
         Err(e) => {
             eprintln!("acrboot: {e}");
-            2
+            if args.iter().any(|a| a == "--bisect") { 128 } else { 2 }
         }
+    }
+}
+
+/// The exit status for `git bisect run`, given CMD's status (with `--run`,
+/// if it finished) and the outcome (`exit`, `panic`, `timeout` or
+/// `error`).  0 is good, 1 bad, 125 skip and 128 stops the bisect:
+///
+/// - CMD's status is passed on (its 125 skips), except that a signal
+///   (128 and above, from `sh`) is bad rather than stopping the bisect;
+/// - a kernel that shut the VM down is good, but with `--run` only once
+///   CMD finished;
+/// - a panic, a timeout, or a VM that ended before CMD finished is bad;
+/// - an error (the VM could not run, or was interrupted) stops the bisect:
+///   it says nothing about the commit.
+fn bisect_status(run: bool, run_status: Option<i32>, outcome: &str) -> i32 {
+    match (run_status, outcome) {
+        (Some(st), _) if (0..128).contains(&st) => st,
+        (Some(_), _) => 1,
+        (None, "error") => 128,
+        (None, "exit") if !run => 0,
+        _ => 1,
     }
 }
 
@@ -184,6 +215,7 @@ fn parse(args: &[String]) -> Result<Option<Request>> {
             "--disk" => req.disks.push(PathBuf::from(val("--disk")?)),
             "--run" => req.run = Some(val("--run")?),
             "--dir" => req.dir = Some(PathBuf::from(val("--dir")?)),
+            "--bisect" => req.bisect = true,
             o if o.starts_with('-') => crate::bail!("unknown option {o}\n{USAGE}"),
             o if req.kernel.is_none() => req.kernel = Some(PathBuf::from(o)),
             o => crate::bail!("unexpected argument {o}\n{USAGE}"),
@@ -406,6 +438,17 @@ fn run(args: &[String]) -> Result<i32> {
         },
         message.map(|m| format!(": {m}")).unwrap_or_default()
     );
+    if req.bisect {
+        let code = bisect_status(req.run.is_some(), run_status, outcome);
+        let verdict = match code {
+            0 => "good",
+            125 => "skip",
+            128 => "stop the bisect",
+            _ => "bad",
+        };
+        eprintln!("acrboot: --bisect: exit {code} ({verdict})");
+        return Ok(code);
+    }
     if req.run.is_some() {
         return Ok(match (run_status, outcome) {
             (Some(st), _) => st,
@@ -649,4 +692,28 @@ fn init_run() -> Result<()> {
     let code = st.code().unwrap_or_else(|| 128 + st.signal().unwrap_or(0));
     println!("\n{RUN_STATUS}{code}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bisect_status;
+
+    #[test]
+    fn bisect_status_is_what_git_bisect_run_expects() {
+        // a kernel on its own
+        assert_eq!(bisect_status(false, None, "exit"), 0);
+        assert_eq!(bisect_status(false, None, "panic"), 1);
+        assert_eq!(bisect_status(false, None, "timeout"), 1);
+        assert_eq!(bisect_status(false, None, "error"), 128);
+        // --run: CMD's status, 125 included; a signal is bad, not "stop"
+        assert_eq!(bisect_status(true, Some(0), "exit"), 0);
+        assert_eq!(bisect_status(true, Some(7), "exit"), 7);
+        assert_eq!(bisect_status(true, Some(125), "exit"), 125);
+        assert_eq!(bisect_status(true, Some(139), "exit"), 1);
+        // --run that never finished: a panic (125 without --bisect) is bad
+        assert_eq!(bisect_status(true, None, "panic"), 1);
+        assert_eq!(bisect_status(true, None, "exit"), 1);
+        assert_eq!(bisect_status(true, None, "timeout"), 1);
+        assert_eq!(bisect_status(true, None, "error"), 128);
+    }
 }

@@ -57,6 +57,39 @@ ac_run sh -c 'echo x > y.txt'
 ac branch "$SID"
 assert_rc 1 "branch fails when the agent made no commits"
 
+step "a bisect left unfinished, or an older commit checked out"
+echo two > two.txt && git add two.txt && $G commit -qm "two"
+echo three > three.txt && git add three.txt && $G commit -qm "three"
+ac_pty 'expect \[x\] discard
+key a
+expect Apply anyway
+key n
+expect \[x\] discard
+key k' sh -c 'git bisect start HEAD HEAD~2 >/dev/null'
+assert_rc 0 "session kept"
+sid=$(latest_session)
+assert_contains "$AC_OUT" "left a git bisect unfinished (HEAD is at $(git rev-parse --short=12 HEAD~1))" \
+    "the menu says the agent left a bisect, and where"
+assert_contains "$AC_OUT" "three.txt" "(whose work tree lacks three.txt)"
+assert_not_contains "$AC_OUT" "The agent committed" "it is not taken for a commit"
+assert_not_contains "$AC_OUT" "[b]ranch" "nor offered as a branch"
+assert_file three.txt "three" "declining to apply leaves the work tree alone"
+ac branch "$sid"
+assert_rc 1 "branch refuses it"
+assert_contains "$AC_ERR" "nothing to import: the agent left a git bisect unfinished" "and says why"
+ac apply "$sid" < /dev/null
+assert_ne "$AC_RC" 0 "apply without a terminal refuses it"
+assert_file three.txt "three" "the work tree is untouched"
+ac show --json "$sid"
+assert_contains "$AC_OUT" '"checked_out_back": "the agent left a git bisect' "show --json says so"
+ac_run sh -c 'git checkout -q HEAD~2'
+ac branch "$SID"
+assert_contains "$AC_ERR" "checked out $(git rev-parse --short=12 HEAD~2), an older commit" "a checkout of an older commit too"
+ac_run sh -c 'git bisect start HEAD HEAD~2 >/dev/null; git bisect reset >/dev/null 2>&1; git -c user.name=a -c user.email=a@a commit -q --allow-empty -m after'
+ac branch "$SID"
+assert_rc 0 "a bisect that was reset is no obstacle"
+base=$(git rev-parse HEAD)   # this step moved main on
+
 step "--branch: the agent works on a branch of that name"
 ac_run --branch feature/x sh -c '
 G="git -c user.name=agent -c user.email=agent@example.com"

@@ -580,6 +580,9 @@ fn review(s: &mut Session, cfg: &Config) -> Result<()> {
             } else if ignored > 0 {
                 eprintln!("{}", dim(&format!("{ignored} more file(s) git ignores (build output) are hidden and not applied; [i] to include them")));
             }
+            if let Some(why) = gitimport::checked_out_back(cs, s.meta.git_head.as_deref()) {
+                eprintln!("\x1b[1mWarning: {why}.\x1b[0m");
+            }
             if let Some((sha, name)) = &head {
                 eprintln!("The agent committed: {} is now {}", crate::util::safe_text(name.as_bytes(), false), crate::util::safe_text(sha.get(..12).unwrap_or(sha).as_bytes(), false));
             }
@@ -663,7 +666,9 @@ fn keep_msg(s: &Session) {
 
 /// Apply change set `cs` of session `s` to the host, asking about conflicts.
 ///
-/// If some changes conflict (the host copy changed since the snapshot), they
+/// If the agent's work tree is an older commit's (an unfinished `git
+/// bisect`, see [`gitimport::checked_out_back`]), it asks first, and
+/// refuses without a terminal.  If some changes conflict (the host copy changed since the snapshot), they
 /// are listed and the user chooses to skip them, overwrite them, or cancel;
 /// without a terminal, conflicts are refused with an error.  Per-path
 /// errors are printed, then a summary line, and the session is marked
@@ -673,6 +678,15 @@ fn keep_msg(s: &Session) {
 /// some paths failed; `Ok(true)` otherwise.  Errors if applying cannot
 /// start.
 fn apply_interactive(s: &mut Session, cs: &ChangeSet) -> Result<bool> {
+    if let Some(why) = gitimport::checked_out_back(cs, s.meta.git_head.as_deref()) {
+        eprintln!("Warning: {why}.  Applying it would put that commit's files in your work tree.");
+        if !isatty(0) {
+            crate::bail!("refusing to apply an older commit's work tree (run interactively to apply anyway)");
+        }
+        if prompt_key("Apply anyway? [y/N] ", "yn\n") != Some('y') {
+            return Ok(false);
+        }
+    }
     let conflicts = cs.conflicts();
     let mut include = false;
     if !conflicts.is_empty() {
@@ -1016,6 +1030,9 @@ fn cmd_diff(args: &[String]) -> Result<i32> {
         return Ok(0);
     }
     ignored_note(&cs, "diff");
+    if let Some(why) = gitimport::checked_out_back(&cs, s.meta.git_head.as_deref()) {
+        eprintln!("agentcracker: {why}");
+    }
     changes::show_diff(&cs, &s.path("tmp"))?;
     Ok(0)
 }
@@ -1233,6 +1250,7 @@ fn session_json(s: &Session) -> serde_json::Value {
         })
         .collect();
     let agent_head = cs.as_ref().and_then(|cs| gitimport::agent_head(cs, m.git_head.as_deref()));
+    let checked_out_back = cs.as_ref().and_then(|cs| gitimport::checked_out_back(cs, m.git_head.as_deref()));
     let (own, shared) = s.disk_usage();
     let o = v.as_object_mut().unwrap();
     o.insert("boots".into(), m.boots.into());
@@ -1245,6 +1263,7 @@ fn session_json(s: &Session) -> serde_json::Value {
             "base": m.git_head,
             "agent_head": agent_head.map(|(sha, branch)| serde_json::json!({ "branch": branch, "commit": sha })),
             "imported_branch": m.branch,
+            "checked_out_back": checked_out_back,
         }),
     );
     o.insert("applied_at".into(), m.applied_at.into());

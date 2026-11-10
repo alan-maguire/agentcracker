@@ -44,17 +44,69 @@ fn is_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The commit the agent's HEAD points to, if it differs from `base`.
-///
-/// Resolves `.git/HEAD` as the agent left it: a symbolic ref
-/// (`ref: refs/...`, validated) is looked up as a loose ref, then in
-/// `packed-refs`; a detached HEAD is used as is.
+/// The commit the agent's HEAD points to, if it is the agent's work: it
+/// differs from `base`, is not an older commit of the host's (see
+/// [`checked_out_back`]) and no `git bisect` is left unfinished.
 ///
 /// `cs`: the change set; `base`: the HEAD commit when the session started.
 /// Returns `(commit id, branch name or "HEAD")`, or `None` if the project
 /// is not a git repository, nothing changed inside `.git/`, HEAD cannot be
-/// resolved, or it still points at `base`.
+/// resolved, or it is not the agent's work as above.
 pub fn agent_head(cs: &ChangeSet, base: Option<&str>) -> Option<(String, String)> {
+    let (sha, name) = resolve_head(cs)?;
+    if Some(sha.as_str()) == base || checked_out_back(cs, base).is_some() {
+        return None;
+    }
+    Some((sha, name))
+}
+
+/// Whether the agent's `.git/` was left with `git bisect` unfinished
+/// (`BISECT_START`, which `git bisect reset` removes, written in the
+/// session).
+fn bisecting(cs: &ChangeSet) -> bool {
+    cs.git.iter().any(|(p, op)| p.as_slice() == b".git/BISECT_START" && matches!(op, Op::File { .. }))
+}
+
+/// Why the agent's work tree is a checkout of an older commit rather than
+/// its own work, or `None` if it is not: a `git bisect` it left unfinished,
+/// or HEAD moved back to an ancestor of `base` (`git checkout v6.1`).
+/// Then its "changes" are that commit's versions of every file that
+/// differs from `base`: applying them would revert the host's work tree,
+/// and there is nothing new to import as a branch.
+///
+/// `cs`: the change set; `base`: the HEAD commit when the session started.
+/// Returns a sentence for the user.
+pub fn checked_out_back(cs: &ChangeSet, base: Option<&str>) -> Option<String> {
+    if !cs.cwd.join(".git").is_dir() || cs.git.is_empty() {
+        return None;
+    }
+    let short = |sha: &str| crate::util::safe_text(sha.get(..12).unwrap_or(sha).as_bytes(), false);
+    let head = resolve_head(cs);
+    if bisecting(cs) {
+        let at = head.map(|(sha, _)| format!(" (HEAD is at {})", short(&sha))).unwrap_or_default();
+        return Some(format!(
+            "the agent left a git bisect unfinished{at}: its work tree is that commit's, not its own work \
+             (`agentcracker resume` and `git bisect reset` to end it)"
+        ));
+    }
+    let (sha, _) = head?;
+    let base = base?;
+    if sha != base && git(&cs.cwd, &["merge-base", "--is-ancestor", &sha, base]).is_ok() {
+        return Some(format!(
+            "the agent checked out {}, an older commit than {}: its work tree is that commit's, not its own work",
+            short(&sha),
+            short(base)
+        ));
+    }
+    None
+}
+
+/// Resolve `.git/HEAD` as the agent left it: a symbolic ref
+/// (`ref: refs/...`, validated) is looked up as a loose ref, then in
+/// `packed-refs`; a detached HEAD is used as is.  Returns `(commit id,
+/// branch name or "HEAD")`, or `None` if the project is not a git
+/// repository, nothing changed inside `.git/` or HEAD cannot be resolved.
+fn resolve_head(cs: &ChangeSet) -> Option<(String, String)> {
     if !cs.cwd.join(".git").is_dir() || cs.git.is_empty() {
         return None;
     }
@@ -79,10 +131,7 @@ pub fn agent_head(cs: &ChangeSet, base: Option<&str>) -> Option<(String, String)
     } else {
         (head.to_string(), "HEAD".to_string())
     };
-    if !is_sha(&sha) || Some(sha.as_str()) == base {
-        return None;
-    }
-    Some((sha, name))
+    is_sha(&sha).then_some((sha, name))
 }
 
 /// Import the agent's new git objects into the host repository via a
@@ -105,6 +154,9 @@ pub fn agent_head(cs: &ChangeSet, base: Option<&str>) -> Option<(String, String)
 /// the branch name and a description such as `3 commit(s) on main`.  Errors
 /// if the agent made no new commits or a git step fails.
 pub fn import_branch(cs: &ChangeSet, s: &Session) -> Result<(String, String)> {
+    if let Some(why) = checked_out_back(cs, s.meta.git_head.as_deref()) {
+        crate::bail!("nothing to import: {why}");
+    }
     let Some((sha, from)) = agent_head(cs, s.meta.git_head.as_deref()) else {
         crate::bail!("the agent made no new commits");
     };

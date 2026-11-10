@@ -147,12 +147,15 @@ its serial console.
 
 ```
 acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]...
-        [--run CMD [--dir DIR]] VMLINUX
+        [--run CMD [--dir DIR]] [--bisect] VMLINUX
 ```
 
 Exit status: 0 the kernel shut the VM down, 1 kernel panic, 124 timeout,
 2 error; with `--run`, CMD's status (124 timeout, 125 the VM ended before
-CMD finished).  Defaults 2 CPUs, 1G, 600s; at most {vcpus} CPUs and {mem}M here
+CMD finished).  For `git bisect run`, add `--bisect`: it exits 0 good, 1
+bad (panic, timeout, CMD killed), CMD's own status otherwise (125 skips),
+128 to stop the bisect when acrboot itself failed.  End a bisect with
+`git bisect reset`.  Defaults 2 CPUs, 1G, 600s; at most {vcpus} CPUs and {mem}M here
 (the test VM's memory comes out of this VM's).
 
 ## 1. Configure the kernel to boot under Firecracker

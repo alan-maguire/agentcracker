@@ -215,6 +215,14 @@ commit there, and imports into `fix/foo` - by fast-forward only, so a
 resumed session's later commits extend it, and rewritten history is
 refused.  The commits carry your git name and email.
 
+If the agent left its work tree at an older commit - a `git bisect` it
+did not `reset`, or `git checkout` of an ancestor of your `HEAD` - its
+"changes" are that commit's version of every file that differs from
+yours.  The review menu, `diff` and `show --json` say so, there is no
+branch to import, and `apply` asks first (and refuses without a
+terminal), since applying would put the old commit's files in your work
+tree.
+
 ## The build cache
 
 The scratch disk starts empty, so every session would build the project
@@ -269,12 +277,25 @@ through) and an `acrboot` command:
 
 ```
 acrboot [--cpus N] [--mem SIZE] [--timeout SECS] [--append ARGS] [--disk FILE]...
-        [--run CMD [--dir DIR]] VMLINUX
+        [--run CMD [--dir DIR]] [--bisect] VMLINUX
 ```
 
 It boots the kernel in a Firecracker microVM of its own, inside the
 session's, and shows the serial console; `acrboot` exits 0 when the
 kernel shut the VM down, 1 on a panic, 124 on a timeout, 2 on an error.
+With `--bisect` it exits with what `git bisect run` expects instead: 0
+(good) when the kernel shut the VM down, or with `--run` the command's
+status (its 125 skips the commit); 1 (bad) on a panic, a timeout, or the
+command killed by a signal; 128, which stops the bisect, when `acrboot`
+itself failed:
+
+```
+git bisect run sh -c 'make -j$(nproc) vmlinux || exit 125; acrboot --bisect --run ./repro.sh vmlinux'
+```
+
+(Without `--bisect`, a panic under `--run` is 125, which `git bisect
+run` would take as "skip".)
+
 Three uses:
 
 ```

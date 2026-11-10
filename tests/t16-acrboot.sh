@@ -62,6 +62,9 @@ fi
 ac_run sh -c 'acrboot vmlinux > console.txt; echo rc=$?; grep -c "Kernel panic - not syncing" console.txt'
 assert_eq "$AC_OUT" "$(printf 'rc=1\n1')" "no root: a panic, exit status 1, with the console"
 assert_contains "$AC_ERR" "kernel panic after" "the outcome is reported"
+ac_run sh -c 'acrboot --bisect vmlinux >/dev/null; echo rc=$?'
+assert_eq "$AC_OUT" "rc=1" "--bisect: a panic is bad"
+assert_contains "$AC_ERR" "acrboot: --bisect: exit 1 (bad)" "and says so"
 ac log "$SID"
 assert_match "$AC_OUT" 'boot +PANIC +[0-9.]+M kernel' "the boot is in the log"
 records=$(session_dir "$SID")/state/.local/state/acrboot
@@ -91,6 +94,12 @@ assert_contains "$AC_OUT" "acrboot: --run exited with status 7" "the command's s
 assert_eq "$(echo "$AC_OUT" | tail -1)" "f" "and the copy's changes are discarded"
 ac_run sh -c 'acrboot --dir sub --run "exit 7" vmlinux >/dev/null 2>&1; echo rc=$?'
 assert_eq "$AC_OUT" "rc=7" "acrboot exits with it"
+ac_run sh -c 'for c in "exit 0" "exit 125" "kill -SEGV \$\$" "echo c > /proc/sysrq-trigger"; do
+  acrboot --bisect --dir sub --run "$c" vmlinux >/dev/null 2>&1; echo $?; done
+acrboot --run "exit 0" vmlinux >/dev/null 2>&1; acrboot --run "echo c > /proc/sysrq-trigger" vmlinux >/dev/null 2>&1; echo $?
+acrboot --bisect nonexistent >/dev/null 2>&1; echo $?'
+assert_eq "$AC_OUT" "$(printf '0\n125\n1\n1\n125\n128')" \
+    "--bisect: the command's status, a signal or panic bad (125 without it), acrboot failing 128"
 ac_run sh -c 'acrboot --run true --dir /usr vmlinux; echo rc=$?'
 assert_contains "$AC_OUT$AC_ERR" "must be outside /usr" "system directories are refused"
 
