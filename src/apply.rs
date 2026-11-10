@@ -340,3 +340,117 @@ pub fn apply(cs: &ChangeSet, tag: &str, include_conflicts: bool) -> Result<Appli
     res.in_place = in_place;
     Ok(res)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::StreamWriter;
+    use crate::util::TestDir;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    /// A project directory `proj` and a directory `outside` next to it, in
+    /// a fresh test directory.
+    fn dirs(name: &str) -> (TestDir, PathBuf, PathBuf) {
+        let t = TestDir::new(name);
+        let (p, o) = (t.0.join("proj"), t.0.join("outside"));
+        std::fs::create_dir(&p).unwrap();
+        std::fs::create_dir(&o).unwrap();
+        std::fs::write(o.join("victim"), "untouched").unwrap();
+        (t, p, o)
+    }
+
+    /// Apply the stream `build` writes (a guest's export, as hostile as it
+    /// likes) to `proj`, as `agentcracker apply` would, overwriting
+    /// conflicts.  Returns the per-path errors.
+    fn apply_stream(t: &TestDir, proj: &Path, build: impl FnOnce(&mut StreamWriter<Vec<u8>>)) -> Vec<String> {
+        let mut w = StreamWriter::new(Vec::new());
+        build(&mut w);
+        w.end().unwrap();
+        let stream = t.0.join("changes.stream");
+        std::fs::write(&stream, &w.w).unwrap();
+        let cs = ChangeSet::from_stream(&stream, &[], proj).unwrap();
+        apply(&cs, "test", true).unwrap().errors
+    }
+
+    fn untouched(o: &Path) {
+        let names: Vec<_> = std::fs::read_dir(o).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["victim"], "nothing was added outside the project");
+        assert_eq!(std::fs::read_to_string(o.join("victim")).unwrap(), "untouched");
+    }
+
+    #[test]
+    fn a_symlink_in_the_stream_cannot_carry_later_writes_outside() {
+        let (t, p, o) = dirs("apply-symlink-then-write");
+        let errors = apply_stream(&t, &p, |w| {
+            w.symlink(b"d", o.as_os_str().as_bytes()).unwrap();
+            w.file(b"d/victim", 0o644, 5, &mut &b"owned"[..]).unwrap();
+            w.file(b"d/new", 0o644, 5, &mut &b"owned"[..]).unwrap();
+            w.dir(b"d/sub", 0o755).unwrap();
+            w.symlink(b"d/link", b"/").unwrap();
+            w.symlink(b"r", b"../outside").unwrap();
+            w.file(b"r/new2", 0o644, 5, &mut &b"owned"[..]).unwrap();
+        });
+        untouched(&o);
+        assert_eq!(errors.len(), 5, "each write beneath the symlink fails: {errors:?}");
+        assert!(std::fs::symlink_metadata(p.join("d")).unwrap().file_type().is_symlink(), "the symlink itself is applied");
+    }
+
+    #[test]
+    fn a_symlink_already_on_the_host_is_not_followed() {
+        let (t, p, o) = dirs("apply-host-symlink");
+        symlink(&o, p.join("d")).unwrap();
+        symlink(o.join("victim"), p.join("f")).unwrap();
+        let errors = apply_stream(&t, &p, |w| {
+            w.file(b"d/victim", 0o644, 5, &mut &b"owned"[..]).unwrap();
+            w.file(b"d/x", 0o644, 5, &mut &b"owned"[..]).unwrap();
+            w.file(b"f", 0o644, 4, &mut &b"mine"[..]).unwrap();
+        });
+        untouched(&o);
+        assert_eq!(errors.len(), 2, "writes through the symlinked directory fail: {errors:?}");
+        assert_eq!(std::fs::read_to_string(p.join("f")).unwrap(), "mine", "a symlink at the target is replaced, not written through");
+        assert!(std::fs::symlink_metadata(p.join("f")).unwrap().is_file());
+    }
+
+    #[test]
+    fn deletions_never_reach_through_a_symlink() {
+        let (_t, p, o) = dirs("apply-delete");
+        symlink(&o, p.join("d")).unwrap();
+        let mut w = Confined::new(&p, "test").unwrap();
+        assert!(w.delete(Path::new("d/victim")).is_err());
+        assert!(w.delete(Path::new("../outside/victim")).is_err());
+        untouched(&o);
+        w.delete(Path::new("d")).unwrap();
+        assert!(!p.join("d").exists(), "the symlink itself is removed");
+        untouched(&o);
+    }
+
+    #[test]
+    fn confined_writes_refuse_paths_out_of_the_root() {
+        let (_t, p, o) = dirs("apply-dotdot");
+        let src = File::open(o.join("victim")).unwrap();
+        let mut w = Confined::new(&p, "test").unwrap();
+        for rel in ["../outside/victim", "../outside/new", "/tmp/acr-test-abs", "a/../../outside/new"] {
+            assert!(w.write_file(Path::new(rel), 0o644, &src, 0, 5).is_err(), "{rel}");
+            assert!(w.mkdir(Path::new(rel), 0o755).is_err(), "{rel}");
+            assert!(w.symlink(Path::new(rel), b"x").is_err(), "{rel}");
+        }
+        untouched(&o);
+        assert!(!Path::new("/tmp/acr-test-abs").exists());
+    }
+
+    #[test]
+    fn modes_are_permission_bits_only_and_git_is_never_written() {
+        let (t, p, _o) = dirs("apply-modes");
+        std::fs::create_dir(p.join(".git")).unwrap();
+        let errors = apply_stream(&t, &p, |w| {
+            w.file(b"suid", 0o6755, 1, &mut &b"x"[..]).unwrap();
+            w.dir(b"sticky", 0o1777).unwrap();
+            w.file(b".git/hooks/post-checkout", 0o755, 1, &mut &b"x"[..]).unwrap();
+            w.file(b".git/config", 0o644, 1, &mut &b"x"[..]).unwrap();
+        });
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(std::fs::metadata(p.join("suid")).unwrap().permissions().mode() & 0o7777, 0o755);
+        assert_eq!(std::fs::metadata(p.join("sticky")).unwrap().permissions().mode() & 0o7000, 0);
+        assert!(!p.join(".git/hooks").exists() && !p.join(".git/config").exists());
+    }
+}

@@ -668,3 +668,25 @@ impl SpaceGuard {
         }
     }
 }
+
+/// A fresh, empty directory under the system temp directory for a unit
+/// test, removed (recursively, without following symlinks) when dropped.
+#[cfg(test)]
+pub struct TestDir(pub PathBuf);
+
+#[cfg(test)]
+impl TestDir {
+    /// Make one; `name` goes into the directory's name.
+    pub fn new(name: &str) -> TestDir {
+        let d = std::env::temp_dir().join(format!("acr-test-{name}-{}-{}", std::process::id(), random_hex(4)));
+        std::fs::create_dir_all(&d).unwrap();
+        TestDir(d)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
