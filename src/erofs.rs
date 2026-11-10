@@ -663,6 +663,47 @@ fn dir_blocks(entries: &[(Vec<u8>, u64, u8)]) -> Vec<u8> {
     out
 }
 
+/// The error for a tree over EROFS's 2^32 blocks (16 TiB): its total size
+/// and its largest files, by apparent size - a project holding sparse disk
+/// images (a VM's, or kept test sessions) gets there long before its disk
+/// usage does.
+fn too_large(tree: &Tree, order: &[usize]) -> String {
+    use crate::util::human_bytes;
+    // each node's (parent, name), to spell out paths
+    let mut up: Vec<Option<(usize, &[u8])>> = vec![None; tree.nodes.len()];
+    for &d in order {
+        if let Kind::Dir(ch) = &tree.nodes[d].kind {
+            for (name, &c) in ch {
+                up[c].get_or_insert((d, name.as_slice()));
+            }
+        }
+    }
+    let path = |mut i: usize| {
+        let mut parts = Vec::new();
+        while let Some((p, name)) = up[i] {
+            parts.push(crate::util::safe_text(name, false));
+            i = p;
+        }
+        parts.reverse();
+        parts.join("/")
+    };
+    let mut files: Vec<(u64, usize)> = order
+        .iter()
+        .filter_map(|&i| match &tree.nodes[i].kind {
+            Kind::File(_, size) => Some((*size, i)),
+            _ => None,
+        })
+        .collect();
+    let total: u64 = files.iter().map(|f| f.0).sum();
+    files.sort_unstable_by(|a, b| b.cmp(a));
+    let largest: Vec<String> = files.iter().take(3).map(|&(size, i)| format!("{} {}", path(i), human_bytes(size))).collect();
+    format!(
+        "image too large: its files add up to {} (apparent size, sparse files at their full length; the limit is 16T); largest: {}",
+        human_bytes(total),
+        largest.join(", ")
+    )
+}
+
 /// Write `tree` as an EROFS image at `out`, atomically.
 ///
 /// Steps: assign nids breadth-first from the root (so the entries of a
@@ -757,7 +798,7 @@ pub fn write_image(tree: &Tree, out: &Path) -> Result<u64> {
         }
     }
     if next_blk > u32::MAX as u64 {
-        crate::bail!("image too large");
+        crate::bail!("{}", too_large(tree, &order));
     }
 
     // 3. inode table
@@ -930,4 +971,25 @@ fn copy_slow(s: &File, d: &File, mut so: u64, mut doff: u64, mut left: u64) -> R
         left -= n as u64;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_image_too_large_names_its_largest_files() {
+        let mut t = Tree::new(0o755, 0, 0);
+        let d = t.mkdir_p(Path::new("build/tests"), 0o755, 0, 0);
+        let sparse = |n: u64| Node { kind: Kind::File(Content::Path("/nonexistent".into()), n), ..Node::bytes(vec![], 0o644, 0, 0) };
+        for i in 0..300 {
+            t.add(d, format!("scratch{i}.img").as_bytes(), sparse(64 << 30));
+        }
+        t.add(0, b"small", Node::bytes(b"x".to_vec(), 0o644, 0, 0));
+        let out = std::env::temp_dir().join(format!("acr-erofs-test-{}.img", std::process::id()));
+        let e = write_image(&t, &out).err().expect("an image over 16T is refused").0;
+        assert!(e.contains("add up to 19T"), "{e}");
+        assert!(e.contains("largest: build/tests/scratch"), "{e}");
+        assert!(!out.exists());
+    }
 }
