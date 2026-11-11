@@ -41,8 +41,18 @@ assert_eq "$(echo "$AC_OUT" | head -1)" "$a exit 0" "sessions are reported as th
 assert_eq "$(echo "$AC_OUT" | tail -1)" "$b exit 1" "...in order of finishing"
 
 step "stop"
-id=$("$AC" --detach sh -c 'echo before > s.txt; trap "echo got-term; exit 9" TERM; sleep 60 & wait' </dev/null)
-sleep 1.5
+# wait until the detached command says it is ready (its trap is set): a
+# fixed sleep loses to a slow boot on a busy host
+ready() {
+    local i
+    for i in $(seq 300); do
+        grep -q ready "$(session_dir "$1")/stdout" 2>/dev/null && return 0
+        sleep 0.1
+    done
+    fail "session $1 never got ready"
+}
+id=$("$AC" --detach sh -c 'echo before > s.txt; trap "echo got-term; exit 9" TERM; echo ready; sleep 60 & wait' </dev/null)
+ready "$id"
 t0=$(date +%s.%N)
 ac stop "$id"
 t=$(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN { printf "%.2f", b - a }')
@@ -53,8 +63,8 @@ assert_eq "$(meta exit_code "$id")" "9" "the command saw SIGTERM"
 assert_contains "$(cat "$(session_dir "$id")/stdout")" "got-term" "and could clean up"
 ac show "$id"
 assert_contains "$AC_ERR" "A s.txt" "a stopped session keeps its changes"
-id=$("$AC" --detach sh -c 'trap "" TERM; sleep 60' </dev/null)
-sleep 1.5
+id=$("$AC" --detach sh -c 'trap "" TERM; echo ready; sleep 60' </dev/null)
+ready "$id"
 ac stop "$id"
 assert_rc 0 "a command ignoring SIGTERM is killed after the grace period"
 ac stop "$id"
