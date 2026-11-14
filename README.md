@@ -198,6 +198,14 @@ so it is careful:
 - nothing the agent wrote reaches your terminal raw: file names, diff
   content and transcript text are shown with control characters escaped.
 
+In a git repository, apply leaves its changes as uncommitted edits in
+your work tree, as if you had made them: review them with `git status`
+and `git diff`, and commit them yourself.  If the agent committed its
+work, apply still writes the work tree it left, so its commits arrive
+as uncommitted edits too.  To get the commits themselves, use
+`agentcracker branch` or `[b]` instead (see below); the review menu and
+apply both point this out.
+
 ## Git: the agent's commits
 
 If the agent commits, `agentcracker branch` (or `[b]` on exit) imports

@@ -44,6 +44,7 @@ ac_pty 'expect \[x\] discard
 key k' sh -c 'git -c user.name=a -c user.email=a@a commit -q --allow-empty -m empty'
 assert_rc 0 "session with a commit kept"
 assert_contains "$AC_OUT" "The agent committed" "menu mentions the agent's commit"
+assert_contains "$AC_OUT" "[b]ranch takes its commits" "and what [b]ranch and [a]pply would do with it"
 assert_contains "$AC_OUT" "[b]ranch" "menu offers [b]ranch"
 ac_pty 'expect \[x\] discard
 key x
@@ -51,6 +52,16 @@ expect Discard unapplied changes
 key y' sh -c 'echo x > untracked.txt'
 assert_rc 0 "session without commits discarded"
 assert_not_contains "$AC_OUT" "[b]ranch" "no [b]ranch without commits"
+
+step "apply after the agent committed"
+ac_run sh -c 'echo c > committed.txt && git add committed.txt && git -c user.name=a -c user.email=a@a commit -qm c'
+ac apply "$SID"
+assert_rc 0 "apply exits 0"
+assert_contains "$AC_ERR" "the agent committed its work" "apply notes the agent committed"
+assert_contains "$AC_ERR" "agentcracker branch\` imports the agent's commits" "and points at branch"
+assert_file committed.txt "c" "the committed file arrives as an edit"
+assert_eq "$(git status --porcelain committed.txt)" "?? committed.txt" "uncommitted"
+rm committed.txt
 
 step "branch without commits"
 ac_run sh -c 'echo x > y.txt'

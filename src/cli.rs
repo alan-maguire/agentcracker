@@ -585,6 +585,14 @@ fn review(s: &mut Session, cfg: &Config) -> Result<()> {
             }
             if let Some((sha, name)) = &head {
                 eprintln!("The agent committed: {} is now {}", crate::util::safe_text(name.as_bytes(), false), crate::util::safe_text(sha.get(..12).unwrap_or(sha).as_bytes(), false));
+                eprintln!(
+                    "{}",
+                    dim(if has_changes {
+                        "[b]ranch takes its commits; [a]pply writes the work tree it left into yours, as uncommitted edits"
+                    } else {
+                        "[b]ranch takes its commits"
+                    })
+                );
             }
         } else {
             eprintln!("No change record (the session did not shut down cleanly).");
@@ -668,7 +676,10 @@ fn keep_msg(s: &Session) {
 ///
 /// If the agent's work tree is an older commit's (an unfinished `git
 /// bisect`, see [`gitimport::checked_out_back`]), it asks first, and
-/// refuses without a terminal.  If some changes conflict (the host copy changed since the snapshot), they
+/// refuses without a terminal.  If the agent committed, it says that apply
+/// writes those commits as uncommitted edits and `branch` takes the commits
+/// themselves; in a git repository it ends by saying the changes are not
+/// committed.  If some changes conflict (the host copy changed since the snapshot), they
 /// are listed and the user chooses to skip them, overwrite them, or cancel;
 /// without a terminal, conflicts are refused with an error.  Per-path
 /// errors are printed, then a summary line, and the session is marked
@@ -703,6 +714,15 @@ fn apply_interactive(s: &mut Session, cs: &ChangeSet) -> Result<bool> {
             _ => return Ok(false),
         }
     }
+    // the agent's commits are in the work tree it left: apply writes them
+    // as edits, which `branch` would bring over as the commits themselves
+    let committed = gitimport::agent_head(cs, s.meta.git_head.as_deref()).is_some();
+    if committed {
+        eprintln!(
+            "Note: the agent committed its work.  Apply writes the work tree it left into yours as uncommitted \
+             edits, commits included; `agentcracker branch` takes the commits themselves."
+        );
+    }
     let r = apply::apply(cs, &s.meta.id, include)?;
     for e in &r.errors {
         eprintln!("agentcracker: apply: {e}");
@@ -716,8 +736,14 @@ fn apply_interactive(s: &mut Session, cs: &ChangeSet) -> Result<bool> {
         if r.skipped.is_empty() { String::new() } else { format!(", {} skipped", r.skipped.len()) },
         if r.errors.is_empty() { String::new() } else { format!(", {} errors", r.errors.len()) }
     ));
-    if !cs.git.is_empty() {
-        status("changes inside .git/ were not applied (use `agentcracker branch` for the agent's commits)");
+    if cs.cwd.join(".git").exists() && r.written + r.deleted > 0 {
+        status(&format!(
+            "not committed: the changes are edits in your work tree (`git status`, `git diff`){}",
+            if committed { "; `agentcracker branch` imports the agent's commits" } else { "" }
+        ));
+    }
+    if !cs.git.is_empty() && !committed {
+        status("changes inside .git/ were not applied");
     }
     s.meta.applied_at = Some(now());
     s.meta.status = "applied".into();

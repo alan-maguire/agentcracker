@@ -561,6 +561,12 @@ another repository that ignores it), nothing is.  Include them with
 in the review menu, or
 .BR "diff \-\-ignored" " and " "apply \-\-ignored" .
 .PP
+In a git repository the applied changes are uncommitted edits in the
+work tree, as if made by hand.  If the agent committed, apply writes the
+work tree it left, so its commits arrive as uncommitted edits as well;
+.B branch
+imports the commits themselves.
+.PP
 If the agent left its work tree at an older commit (a
 .B "git bisect"
 it did not reset, or a checkout of an ancestor of your HEAD), its changes

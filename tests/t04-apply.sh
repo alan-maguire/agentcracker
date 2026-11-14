@@ -67,6 +67,8 @@ assert_rc 0 "apply exits 0"
 assert_no_file .git/agent-was-here "writes inside .git/ are not applied"
 assert_eq "$(git config --local user.name || true)" "" "git config edits are not applied"
 assert_file tracked.txt "y" "the work tree change is applied"
+assert_contains "$AC_ERR" "not committed: the changes are edits in your work tree" "apply says the changes are not committed"
+assert_not_contains "$AC_ERR" "the agent committed" "no commit note without commits"
 assert_eq "$(git rev-parse HEAD)" "$head_before" "HEAD unchanged"
 assert_contains "$AC_ERR" "inside .git/ were not applied" "apply says .git changes were skipped"
 
