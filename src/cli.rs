@@ -545,7 +545,8 @@ fn boot_once(s: &mut Session, cfg: &Config, cmd: &[String], console: bool, first
 ///
 /// Shows the change list, the summary, the number of conflicts and any new
 /// commit, then offers: `d` (page through the diff), `a` (apply, then keep
-/// or discard the session), `b` (import the agent's commits as a branch),
+/// or discard the session), `b` (import the agent's commits as a branch,
+/// then keep - the default - or discard the session),
 /// `s` (boot the session again with the user's shell, then come back here),
 /// `K` (keep - the default, also on Enter or end of input) and `x`
 /// (discard, asking first if changes were never applied).  It loops until
@@ -639,6 +640,16 @@ fn review(s: &mut Session, cfg: &Config) -> Result<()> {
                         status(&format!("created branch {b} ({desc})"));
                         s.meta.branch = Some(b);
                         s.save()?;
+                        // done, as after apply; but keep by default: what the
+                        // agent left uncommitted is still only in the session
+                        if prompt_key("Branch created. Keep the session? [Y/n] ", "yn\n") == Some('n') {
+                            let id = s.meta.id.clone();
+                            Session::load_dir(&s.dir)?.remove()?;
+                            status(&format!("session {id} discarded"));
+                        } else {
+                            keep_msg(s);
+                        }
+                        return Ok(());
                     }
                     Err(e) => eprintln!("agentcracker: {e}"),
                 }

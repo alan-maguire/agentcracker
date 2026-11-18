@@ -63,6 +63,26 @@ assert_file committed.txt "c" "the committed file arrives as an edit"
 assert_eq "$(git status --porcelain committed.txt)" "?? committed.txt" "uncommitted"
 rm committed.txt
 
+step "[b] in the review menu imports the commits and ends the review"
+ac_pty 'expect \[x\] discard
+key b
+expect Keep the session\? \[Y/n\]
+send \r' sh -c 'git -c user.name=a -c user.email=a@a commit -q --allow-empty -m via-menu'
+assert_rc 0 "the review ends"
+sid=$(latest_session)
+assert_eq "$(grep -c 'created branch' <<<"$AC_OUT")" "1" "after one [b]"
+assert_contains "$AC_OUT" "kept session $sid" "keeping the session by default"
+assert_eq "$(git log -1 --format=%s "agentcracker/$sid")" "via-menu" "with the branch made"
+ac_pty 'expect \[x\] discard
+key b
+expect Keep the session
+key n' sh -c 'git -c user.name=a -c user.email=a@a commit -q --allow-empty -m via-menu-2'
+assert_rc 0 "the review ends"
+assert_contains "$AC_OUT" "discarded" "or discarding it on n"
+b2=$(sed -n 's/.*created branch \(agentcracker\/[0-9a-f]*\).*/\1/p' <<<"$AC_OUT" | tr -d '\r')
+assert_eq "$(git log -1 --format=%s "$b2")" "via-menu-2" "whose branch stays"
+assert_eq "$(session_exists "${b2#agentcracker/}" && echo yes || echo no)" "no" "and the session is gone"
+
 step "branch without commits"
 ac_run sh -c 'echo x > y.txt'
 ac branch "$SID"

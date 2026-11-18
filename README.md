@@ -469,9 +469,10 @@ the commits and take them as a branch.
 4. **On exit, take the branch.**  The review menu says the agent
    committed and offers **`[b]ranch`**: it imports the commits into your
    repository as `fix/foo`, without touching your current branch, index
-   or work tree.  Review them like anyone's (`git log -p main..fix/foo`),
-   and use **`[d]iff`** for anything it changed but did not commit.  Then
-   merge, rebase or send them as you would any branch.
+   or work tree, and ends the review, keeping the session unless you say
+   otherwise.  Review them like anyone's (`git log -p main..fix/foo`),
+   and use `agentcracker diff` for anything it changed but did not
+   commit.  Then merge, rebase or send them as you would any branch.
 5. **Iterate.**  `agentcracker resume SESSION` boots the same session
    again, still on `fix/foo`; ask for changes, then `agentcracker branch`
    (or `[b]` on exit) again.  A named branch is only ever fast-forwarded:

@@ -371,7 +371,10 @@ apply: write the changes to the host (resolving conflicts if there are
 any), then ask whether to keep the session.
 .TP
 .B b
-branch: import the agent's git commits (offered only if it made some).
+branch: import the agent's git commits (offered only if it made some),
+then end the review, keeping the session unless you answer
+.BR n :
+what the agent left uncommitted is still only in the session.
 .TP
 .B i
 ignored: include the changes git ignores in the list, the diff and apply,
